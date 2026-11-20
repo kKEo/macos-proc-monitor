@@ -56,6 +56,8 @@ struct Status: ParsableCommand {
         }
         if !found { line("last sample", "none yet — the first sample appears two intervals after the daemon starts") }
 
+        try processSection(database, now: now)
+
         let lastHour = try database.scalarInt("SELECT COUNT(*) FROM sample WHERE ts >= ?", [now - 3_600_000]) ?? 0
         let totalSamples = try database.scalarInt("SELECT COUNT(*) FROM sample") ?? 0
         let wakes = try database.scalarInt("SELECT COUNT(*) FROM sample WHERE flags & 1") ?? 0
@@ -64,6 +66,48 @@ struct Status: ParsableCommand {
             sum + (((try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber)?.int64Value ?? 0)
         }
         line("history", "\(lastHour) samples in the last hour, \(totalSamples) in total, \(wakes) wake-ups recorded, database \(bytes(size))")
+    }
+
+    /// Process counts, the monitor's own cost, and the busiest processes of the latest sweep.
+    private func processSection(_ database: Database, now: Int64) throws {
+        var sampleId: Int64?, procDt = 1.0
+        try database.query("""
+            SELECT s.sample_id, s.proc_dt_ms, y.proc_count, y.thread_count, y.runnable_wait_ms, y.unattributed_cpu_ms
+            FROM sample s JOIN sys_sample y USING (sample_id) WHERE s.proc_dt_ms IS NOT NULL ORDER BY s.sample_id DESC LIMIT 1
+            """) { r in
+            sampleId = r.int(0); procDt = max(Double(r.int(1)), 1)
+            let own = (try? database.scalarInt("SELECT COUNT(*) FROM process WHERE exited_ts IS NULL AND source = 0")) ?? 0
+            line("processes", "\(r.int(2)) running (\(own) readable without root), \(r.int(3)) threads in readable ones")
+            line("contention", "\(fmt(Double(r.int(4)) / procDt, 2)) cores' worth of threads waiting"
+                 + (r.isNull(5) ? "" : ", \(pct(Double(r.int(5)), procDt)) of a core not attributed to readable processes"))
+        }
+        guard let sampleId else { return }
+
+        // The daemon's own cost over the last five minutes (its rows are always stored).
+        try database.query("""
+            SELECT SUM(p.cpu_user_ms + p.cpu_sys_ms) * 100.0 / SUM(s.proc_dt_ms), MAX(p.footprint), MAX(p.sample_id)
+            FROM proc_sample p JOIN sample s USING (sample_id) WHERE p.reason & 8 AND s.ts >= ?
+            """, [now - 300_000]) { r in
+            guard !r.isNull(0) else { return }
+            let level = (try? database.scalarInt("SELECT value FROM event WHERE kind = 'collector_backoff' ORDER BY event_id DESC LIMIT 1")) ?? nil
+            line("monitor", "\(fmt(r.double(0), 2)) % of a core, \(bytes(r.int(1))) (5-minute average)"
+                 + ((level ?? 0) > 0 ? ", self-limiter at level \(level!)" : ""))
+        }
+
+        for (title, order) in [("top cpu", "(p.cpu_user_ms + p.cpu_sys_ms) DESC"), ("top memory", "p.footprint DESC")] {
+            var first = true
+            try database.query("""
+                SELECT e.name, pr.pid, (p.cpu_user_ms + p.cpu_sys_ms) * 100.0 / ?, p.footprint
+                FROM proc_sample p JOIN process pr USING (proc_id) JOIN executable e USING (exe_id)
+                WHERE p.sample_id = ? ORDER BY \(order) LIMIT 5
+                """, [procDt, sampleId]) { r in
+                let name = r.text(0).padding(toLength: 28, withPad: " ", startingAt: 0)
+                let text = "\(name) pid \(String(r.int(1)).padding(toLength: 6, withPad: " ", startingAt: 0)) "
+                    + "\(fmt(r.double(2), 1).leftPad(6)) % cpu  \(bytes(r.int(3)).leftPad(8))"
+                line(first ? title : "", text)
+                first = false
+            }
+        }
     }
 
     private func line(_ label: String, _ value: String) {
@@ -78,4 +122,8 @@ struct Status: ParsableCommand {
         if d >= kb { return fmt(d / kb, 0) + " kB" }
         return "\(v) B"
     }
+}
+
+extension String {
+    func leftPad(_ width: Int) -> String { count >= width ? self : String(repeating: " ", count: width - count) + self }
 }

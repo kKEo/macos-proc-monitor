@@ -53,6 +53,8 @@ do {
     let collectors = LiveCollectors()
 
     var failures = 0
+    var appliedBackoff = 0
+    var schedulerRef: Scheduler?
     let planner = TickPlanner(systemSeconds: config.systemIntervalSeconds,
                               processSeconds: config.processIntervalSeconds,
                               slowSeconds: config.slowIntervalSeconds)
@@ -62,12 +64,22 @@ do {
             try recorder?.append(rec)
             try pipeline.ingest(rec)
             failures = 0
+            // Self-limiting: stretch the process sweep interval while the daemon is over budget.
+            if pipeline.backoffLevel != appliedBackoff {
+                appliedBackoff = pipeline.backoffLevel
+                schedulerRef?.setIntervals(systemSeconds: config.systemIntervalSeconds,
+                                           processSeconds: config.processIntervalSeconds * pipeline.backoffMultiplier,
+                                           slowSeconds: config.slowIntervalSeconds)
+                Log.info("self-limiter level \(appliedBackoff): process interval \(config.processIntervalSeconds * pipeline.backoffMultiplier) s")
+            }
         } catch {
             failures += 1
             // Log the first failure and then only occasionally, so a persistent fault cannot flood the log.
             if failures == 1 || failures % 100 == 0 { Log.error("tick \(tick.seq) failed (\(failures) in a row): \(error)") }
         }
     }
+
+    schedulerRef = scheduler
 
     // Shut down cleanly on SIGTERM (launchd) and SIGINT (terminal).
     var signalSources: [DispatchSourceSignal] = []
@@ -84,7 +96,7 @@ do {
         signalSources.append(src)
     }
 
-    Log.info("pmond \(PmonVersion.string) started: db=\(dbPath) system=\(config.systemIntervalSeconds)s slow=\(config.slowIntervalSeconds)s"
+    Log.info("pmond \(PmonVersion.string) started: db=\(dbPath) system=\(config.systemIntervalSeconds)s process=\(config.processIntervalSeconds)s slow=\(config.slowIntervalSeconds)s"
              + (recordPath.map { " recording=\($0)" } ?? ""))
     scheduler.start()
     dispatchMain()

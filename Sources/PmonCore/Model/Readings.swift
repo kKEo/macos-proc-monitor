@@ -113,7 +113,10 @@ public struct TickRecord: Codable, Equatable, Sendable {
     public var tick: Tick
     public var system: SystemReading?
     public var slow: SlowReading?
-    public init(tick: Tick, system: SystemReading? = nil, slow: SlowReading? = nil) {
-        self.tick = tick; self.system = system; self.slow = slow
+    public var procs: ProcSweep?
+    /// The daemon's own pid, so its cost can be tracked like any other process.
+    public var selfPid: Int32?
+    public init(tick: Tick, system: SystemReading? = nil, slow: SlowReading? = nil, procs: ProcSweep? = nil, selfPid: Int32? = nil) {
+        self.tick = tick; self.system = system; self.slow = slow; self.procs = procs; self.selfPid = selfPid
     }
 }

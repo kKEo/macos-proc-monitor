@@ -18,6 +18,9 @@ let package = Package(
         .executableTarget(
             name: "pmon",
             dependencies: ["PmonCore", .product(name: "ArgumentParser", package: "swift-argument-parser")]),
+        .executableTarget(
+            name: "pmon-stress",
+            dependencies: ["PmonCore", .product(name: "ArgumentParser", package: "swift-argument-parser")]),
         .testTarget(name: "PmonCoreTests", dependencies: ["PmonCore"]),
     ],
     swiftLanguageModes: [.v5]

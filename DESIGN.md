@@ -324,7 +324,7 @@ Chronic problems that never trip an episode but are worth reporting. A once-a-mi
 
 ## 9. Data model
 
-SQLite in WAL mode at `~/Library/Application Support/pmon/pmon.db`, owned by the user. One writer, any number of readers. Timestamps are Unix milliseconds UTC. Durations in ms, sizes in bytes, energy in µJ. All fact tables are `WITHOUT ROWID` with the time key first so range scans are sequential.
+SQLite in WAL mode at `~/Library/Application Support/pmon/pmon.db`, owned by the user. The SQL below is the schema as of migration 2; migration 1 is frozen in `Schema.swift` and later changes are hand-written steps in `Migrations.swift`. One writer, any number of readers. Timestamps are Unix milliseconds UTC. Durations in ms, sizes in bytes, energy in µJ. All fact tables are `WITHOUT ROWID` with the time key first so range scans are sequential.
 
 The shape is a star schema: small dimension tables, narrow fact tables at three resolutions, and derived tables that hold conclusions.
 
@@ -385,7 +385,8 @@ CREATE INDEX process_app ON process(app_id, last_seen);
 CREATE TABLE sample (               -- one row per collection tick
   sample_id INTEGER PRIMARY KEY,    -- monotonically increasing, time-ordered
   ts INTEGER NOT NULL, boot_id INTEGER NOT NULL,
-  dt_ms INTEGER NOT NULL,           -- real elapsed time covered by the deltas
+  dt_ms INTEGER NOT NULL,           -- real elapsed time covered by the system deltas
+  proc_dt_ms INTEGER,               -- time covered by this tick's process and app rows (NULL on tier 1)
   tier INTEGER NOT NULL,            -- 1 system only, 2 system + processes
   flags INTEGER NOT NULL DEFAULT 0  -- after_wake, degraded, helper_present, foreign_fresh, episode_open
 );                                  -- foreign_fresh: this tick carries a new top-stream reading
@@ -421,7 +422,8 @@ CREATE TABLE proc_sample (          -- selective: top-K and above-floor processe
   sample_id INTEGER NOT NULL, proc_id INTEGER NOT NULL,
   cpu_user_ms INTEGER, cpu_sys_ms INTEGER, cpu_p_ms INTEGER,
   cpu_fg_ms INTEGER,                -- interactive + initiated + default + legacy QoS
-  cpu_bg_ms INTEGER,                -- utility + background + maintenance QoS
+  cpu_util_ms INTEGER,              -- utility QoS
+  cpu_bg_ms INTEGER,                -- background + maintenance QoS
   runnable_ms INTEGER,
   footprint INTEGER, rss INTEGER, d_footprint INTEGER, d_pageins INTEGER,
   d_disk_read INTEGER, d_disk_write INTEGER,
@@ -438,7 +440,7 @@ CREATE INDEX proc_sample_proc ON proc_sample(proc_id, sample_id);
 CREATE TABLE app_sample (           -- complete: every active app, all its processes summed
   sample_id INTEGER NOT NULL, app_id INTEGER NOT NULL,
   proc_count INTEGER,
-  cpu_ms INTEGER, cpu_p_ms INTEGER, cpu_fg_ms INTEGER, cpu_bg_ms INTEGER, runnable_ms INTEGER,
+  cpu_ms INTEGER, cpu_p_ms INTEGER, cpu_fg_ms INTEGER, cpu_util_ms INTEGER, cpu_bg_ms INTEGER, runnable_ms INTEGER,
   footprint INTEGER, d_footprint INTEGER, d_pageins INTEGER,
   d_disk_read INTEGER, d_disk_write INTEGER, d_wakeups INTEGER, d_energy_uj INTEGER,
   d_net_in INTEGER, d_net_out INTEGER, d_gpu_ms INTEGER,
@@ -519,7 +521,7 @@ Three grains with identical columns (`_1m`, `_1h`, `_1d`), so a report picks a t
 CREATE TABLE app_rollup_1h (
   bucket_ts INTEGER NOT NULL, app_id INTEGER NOT NULL,
   covered_ms INTEGER,               -- observed time in bucket; the denominator for rates
-  cpu_ms INTEGER, cpu_fg_ms INTEGER, cpu_bg_ms INTEGER, cpu_pct_max REAL,
+  cpu_ms INTEGER, cpu_fg_ms INTEGER, cpu_util_ms INTEGER, cpu_bg_ms INTEGER, cpu_pct_max REAL,
   footprint_avg INTEGER, footprint_max INTEGER, footprint_last INTEGER,
   disk_read INTEGER, disk_write INTEGER, wakeups INTEGER, energy_uj INTEGER, pageins INTEGER,
   net_in INTEGER, net_out INTEGER,
@@ -636,6 +638,7 @@ Every command takes `--json`. The HTML report is a generated static file, not a 
 | Private responsibility API changes or disappears | Four fallback rules in section 7; `process.attribution` records which rule was used so regressions are visible |
 | Score thresholds are guesses | Thresholds live in config; phase 3 calibrates against recorded data and manual "it felt slow now" markers (`pmon mark`) |
 | Memory blame is inherently fuzzy — pressure is a collective state | Report shares and culprit/victim roles with a confidence level, not a single guilty app |
+| A process's CPU between its last sweep and its exit is never read (measured in phase 2: a 30 s, 4-thread load lost its final 1.6 s, 5.6 % of its total; complete intervals were within 2 %, and CPU plus wait matched wall time × threads within 0.1 %) | The loss lands in `unattributed_cpu_ms`, so totals still reconcile; exec tracing through the root helper is the only exact fix |
 | Processes living under 10 s are invisible to the sweep | `unattributed_cpu_ms` detects it; triggered exec tracing identifies them |
 | GPU per-process data is fragile across OS releases | Optional collector, low-confidence proxy otherwise |
 | `top` output format changes with an OS update | Columns pinned with `-stats`, header validated at start, automatic fallback to `ps` (CPU only) with a visible event |

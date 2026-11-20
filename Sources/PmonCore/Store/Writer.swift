@@ -32,6 +32,17 @@ enum Dimensions {
     }
 }
 
+/// Totals over one process sweep, stored on the system sample of the same tick.
+struct ProcTotals {
+    var procCount: Int
+    /// Threads of the processes we can read; foreign processes are not included yet.
+    var threadCount: Int
+    var waitMs: Int64
+    /// System busy CPU not accounted for by any process we read. Nil when the system
+    /// counters did not cover the whole process interval.
+    var unattributedCpuMs: Int64?
+}
+
 /// Writes one tick's results in a single transaction.
 struct Writer {
     let db: Database
@@ -39,14 +50,21 @@ struct Writer {
     let pageSize: Int64
 
     /// Insert the `sample` row and return its id.
-    func insertSample(tick: Tick, tier: Int, flags: SampleFlags) throws -> Int64 {
-        try db.run("INSERT INTO sample (ts, boot_id, dt_ms, tier, flags) VALUES (?, ?, ?, ?, ?)",
-                   [tick.wallMs, bootId, Int64(tick.dtNs / 1_000_000), tier, flags.rawValue])
+    func insertSample(tick: Tick, tier: Int, flags: SampleFlags, procDtMs: Int64? = nil) throws -> Int64 {
+        try db.run("INSERT INTO sample (ts, boot_id, dt_ms, proc_dt_ms, tier, flags) VALUES (?, ?, ?, ?, ?, ?)",
+                   [tick.wallMs, bootId, Int64(tick.dtNs / 1_000_000), procDtMs, tier, flags.rawValue])
         return db.lastInsertRowId
     }
 
-    func insertSystem(sampleId: Int64, tick: Tick, reading r: SystemReading, delta d: SystemDelta, slow: SlowReading?) throws {
+    func insertEvent(ts: Int64, kind: String, value: Int64?, detail: String?) throws {
+        try db.run("INSERT INTO event (ts, kind, value, detail) VALUES (?, ?, ?, ?)", [ts, kind, value, detail])
+    }
+
+    func insertSystem(sampleId: Int64, tick: Tick, reading r: SystemReading, delta d: SystemDelta, slow: SlowReading?,
+                      procs: ProcTotals?) throws {
         let cols: [(String, Any?)] = [
+            ("proc_count", procs?.procCount), ("thread_count", procs?.threadCount),
+            ("runnable_wait_ms", procs?.waitMs), ("unattributed_cpu_ms", procs?.unattributedCpuMs),
             ("sample_id", sampleId),
             ("cpu_user_ms", d.cpuUserMs), ("cpu_sys_ms", d.cpuSysMs), ("cpu_idle_ms", d.cpuIdleMs),
             ("p_busy_ms", d.pBusyMs), ("e_busy_ms", d.eBusyMs),

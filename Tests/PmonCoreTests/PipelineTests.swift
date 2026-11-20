@@ -48,8 +48,8 @@ final class PipelineTests: XCTestCase {
             XCTAssertEqual(r.int(11), 1); XCTAssertEqual(r.int(12), 80); XCTAssertEqual(r.int(13), 1)
             XCTAssertTrue(r.isNull(14), "scores are not computed yet and must be NULL, not 0")
         }
-        // Tier 2 on every second tick (process cadence), tier 1 otherwise.
-        XCTAssertEqual(try db.scalarInt("SELECT COUNT(*) FROM sample WHERE tier = 2"), 6)
+        // No process sweeps in these records, so every sample is system-only.
+        XCTAssertEqual(try db.scalarInt("SELECT COUNT(*) FROM sample WHERE tier = 2"), 0)
         // Slow tier fired at tick 0 (baseline, not stored) and tick 12.
         XCTAssertEqual(try db.scalarInt("SELECT COUNT(*) FROM volume_sample"), 1)
         XCTAssertEqual(try db.scalarInt("SELECT free FROM volume_sample"), 11 << 30)

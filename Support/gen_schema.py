@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Generate Sources/PmonCore/Store/Schema.swift from the SQL blocks in DESIGN.md section 9.1-9.4.
 The design document is the single source of truth for the schema. Run from the repository root."""
-import re
+import re, sys
+# Migration 1 is deployed, so its text is frozen. Later schema changes are hand-written
+# migrations in Migrations.swift, and DESIGN.md section 9 describes the latest shape.
+if "--force" not in sys.argv:
+    sys.exit("Schema.v1 is frozen (it is deployed). Add a migration instead; --force only for a fresh project.")
 doc = open("DESIGN.md").read()
 part = doc[doc.index("### 9.1 Dimensions"):doc.index("### 9.5")]
 blocks = re.findall(r"```sql\n(.*?)```", part, re.S)
