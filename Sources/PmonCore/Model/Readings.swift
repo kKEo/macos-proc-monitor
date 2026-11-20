@@ -73,6 +73,8 @@ public struct SystemReading: Codable, Equatable, Sendable {
     public var swapUsed: UInt64 = 0, swapTotal: UInt64 = 0
     public var disk = DiskReading()
     public var net = NetReading()
+    /// GPU device utilisation, 0...100. Nil when the GPU collector is off or the value is unavailable.
+    public var gpuUtilPct: Int?
     public init() {}
 }
 
@@ -90,6 +92,8 @@ public struct SlowReading: Codable, Equatable, Sendable {
     public var lowPower = false
     /// 0 nominal, 1 fair, 2 serious, 3 critical.
     public var thermalLevel = 0
+    /// Time to read one uncached block from the system volume, microseconds (optional collector).
+    public var diskProbeUs: Int?
     public init() {}
 }
 
@@ -122,6 +126,10 @@ public struct TickRecord: Codable, Equatable, Sendable {
     /// Collector state changes to record as events.
     public var notes: [CollectorNote]?
     public var session: SessionReading?
+    /// Optional collectors: per-process GPU time, finished captures, a short-lived process scan.
+    public var gpu: [GpuClient]?
+    public var captures: [CaptureResult]?
+    public var shortLived: ShortLivedScan?
     public init(tick: Tick, system: SystemReading? = nil, slow: SlowReading? = nil, procs: ProcSweep? = nil, selfPid: Int32? = nil) {
         self.tick = tick; self.system = system; self.slow = slow; self.procs = procs; self.selfPid = selfPid
     }

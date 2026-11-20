@@ -8,6 +8,8 @@ struct AppAgg {
     var cpuPMs: Int64?, cpuFgMs: Int64?, cpuUtilMs: Int64?, cpuBgMs: Int64?, waitMs: Int64?
     var footprint: Int64?, dFootprint: Int64?, pageins: Int64?
     var diskRead: Int64?, diskWrite: Int64?, wakeups: Int64?, energyUj: Int64?
+    /// GPU time; nil unless the per-process GPU collector is running.
+    var gpuMs: Int64?
     /// 0 native, 1 top stream, 2 ps, 3 residual. The worst contributor wins.
     var fidelity = 0
 
@@ -19,7 +21,7 @@ struct AppAgg {
         Self.add(&cpuUtilMs, o.cpuUtilMs); Self.add(&cpuBgMs, o.cpuBgMs); Self.add(&waitMs, o.waitMs)
         Self.add(&footprint, o.footprint); Self.add(&dFootprint, o.dFootprint); Self.add(&pageins, o.pageins)
         Self.add(&diskRead, o.diskRead); Self.add(&diskWrite, o.diskWrite)
-        Self.add(&wakeups, o.wakeups); Self.add(&energyUj, o.energyUj)
+        Self.add(&wakeups, o.wakeups); Self.add(&energyUj, o.energyUj); Self.add(&gpuMs, o.gpuMs)
         fidelity = max(fidelity, o.fidelity)
     }
 
@@ -38,6 +40,7 @@ struct AppAgg {
             || (diskRead ?? 0) + (diskWrite ?? 0) >= 65_536
             || abs(dFootprint ?? 0) >= 1 << 20
             || (footprint ?? 0) >= 100 << 20
+            || (gpuMs ?? 0) > 0
     }
 
     /// The part of this aggregate that falls into one of several ticks covering its interval.
@@ -62,7 +65,7 @@ struct AppStore {
     let db: Database
 
     private static let additive = ["proc_count", "cpu_ms", "cpu_p_ms", "cpu_fg_ms", "cpu_util_ms", "cpu_bg_ms", "runnable_ms",
-                                   "footprint", "d_footprint", "d_pageins", "d_disk_read", "d_disk_write", "d_wakeups", "d_energy_uj"]
+                                   "footprint", "d_footprint", "d_pageins", "d_disk_read", "d_disk_write", "d_wakeups", "d_energy_uj", "d_gpu_ms"]
     private static let sql: String = {
         let merge = additive.map {
             "\($0) = CASE WHEN \($0) IS NULL AND excluded.\($0) IS NULL THEN NULL ELSE COALESCE(\($0), 0) + COALESCE(excluded.\($0), 0) END"
@@ -77,6 +80,6 @@ struct AppStore {
 
     func add(sampleId: Int64, appId: Int64, _ a: AppAgg, isFocus: Bool) throws {
         try db.run(Self.sql, [sampleId, appId, a.procCount == 0 ? nil : a.procCount, a.cpuMs, a.cpuPMs, a.cpuFgMs, a.cpuUtilMs, a.cpuBgMs, a.waitMs,
-                              a.footprint, a.dFootprint, a.pageins, a.diskRead, a.diskWrite, a.wakeups, a.energyUj, isFocus, a.fidelity])
+                              a.footprint, a.dFootprint, a.pageins, a.diskRead, a.diskWrite, a.wakeups, a.energyUj, a.gpuMs, isFocus, a.fidelity])
     }
 }

@@ -63,6 +63,26 @@ public final class Pipeline {
     private var retentionBacklog = false
     private var needsVacuum = false
 
+    // Optional collectors.
+    /// Cumulative GPU time per pid at the previous process sweep; nil when the collector was not running then.
+    private var gpuPrev: [Int32: UInt64]?
+    private var lastOwn: (deltas: [ProcDelta], dtMs: Int64, selfPid: Int32?)?
+    private var captureRequest: CaptureRequest?
+    private var unknownCpuShare: Double?
+
+    /// Set when an episode opens: what the capture collectors should look at. Returned once.
+    public func takeCaptureRequest() -> CaptureRequest? {
+        defer { captureRequest = nil }
+        return captureRequest
+    }
+
+    /// CPU that could not be attributed to any process in the latest measurement, as a share of
+    /// one core. Returned once per measurement; a high value is the cue for a short-lived process scan.
+    public func takeUnknownCpuShare() -> Double? {
+        defer { unknownCpuShare = nil }
+        return unknownCpuShare
+    }
+
     /// True while an episode is open or may be forming: the driver then samples at the fast
     /// cadence and asks `ps` for other users' processes on every sweep.
     public var wantsFastCadence: Bool { detector.wantsFastCadence }
@@ -154,6 +174,11 @@ public final class Pipeline {
                                    appId: target?.appId, procId: target?.procId)
             if note.kind == "hang" { lastHang = (tick.wallMs, target?.appId) }
         }
+        for c in rec.captures ?? [] {
+            let procId = c.pid.flatMap { procStore.uidByPidLive[$0] }.flatMap { procStore.procIds[$0] }
+            try writer.insertCapture(ts: tick.wallMs, c, procId: procId)
+        }
+        if let scan = rec.shortLived { try recordShortLived(scan, ts: tick.wallMs) }
         try updateContext(rec, ts: tick.wallMs)
 
         // An interval that spans sleep is not a real interval: drop every baseline so the next
@@ -260,6 +285,7 @@ public final class Pipeline {
             if psActive, let notOwn = totals?.unattributedCpuMs {
                 totals?.foreignCpuMs = Int64(foreignCpuMs.rounded())
                 totals?.unknownCpuMs = notOwn - Int64(foreignCpuMs.rounded())
+                if let dt = procDtMs, dt > 0 { unknownCpuShare = Double(totals!.unknownCpuMs!) / Double(dt) }
             } else if let top = rec.top, foreignDtMs != nil, totals != nil {
                 totals?.foreignCpuMs = Int64(foreignCpuMs.rounded())
                 // The top sample covers [previous top sample, this top sample], which does not line
@@ -268,6 +294,7 @@ public final class Pipeline {
                    let b0 = busySeries.value(at: last), let b1 = busySeries.value(at: top.monoNs),
                    let o0 = ownSeries.value(at: last), let o1 = ownSeries.value(at: top.monoNs) {
                     totals?.unknownCpuMs = Int64(((b1 - b0) - (o1 - o0) - foreignCpuMs).rounded())
+                    if top.monoNs > last { unknownCpuShare = Double(totals!.unknownCpuMs!) / (Double(top.monoNs - last) / 1e6) }
                 }
             }
             if let top = rec.top { lastTopMonoNs = top.monoNs }
@@ -286,9 +313,26 @@ public final class Pipeline {
         let id = try writer.insertSample(tick: tick, tier: rec.procs != nil ? 2 : 1, flags: flags,
                                          procDtMs: procDtMs, foreignDtMs: foreignDtMs)
         try writer.insertSystem(sampleId: id, tick: tick, reading: sys, delta: d, slow: lastSlow, procs: totals,
-                                session: session, focusAppId: focusAppId, scores: scores)
+                                session: session, focusAppId: focusAppId, scores: scores, diskProbeUs: rec.slow?.diskProbeUs)
+
+        // GPU time per process, when that collector is running: deltas between consecutive sweeps.
+        var gpuByApp: [Int64: Int64] = [:]
+        if rec.procs != nil {
+            let now = rec.gpu.map { Dictionary($0.map { ($0.pid, $0.ns) }, uniquingKeysWith: { a, _ in a }) }
+            if let now, let prev = gpuPrev {
+                for (pid, ns) in now.sorted(by: { $0.key < $1.key }) {
+                    // A client that closed takes its accumulated time with it, so a total can fall: no delta then.
+                    guard let before = prev[pid], ns > before, let uid = procStore.uidByPidLive[pid],
+                          let app = procStore.appIdByUid[uid] else { continue }
+                    let ms = Int64((Double(ns - before) / 1e6).rounded())
+                    if ms > 0 { gpuByApp[app, default: 0] += ms }
+                }
+            }
+            gpuPrev = now
+        }
 
         if let procDtMs {
+            lastOwn = (deltas, procDtMs, rec.selfPid)
             for (delta, reason) in selection.select(own: deltas, selfPid: rec.selfPid, dtMs: procDtMs) {
                 try procStore.insertSample(sampleId: id, delta, reason: reason)
             }
@@ -300,6 +344,10 @@ public final class Pipeline {
             if recentTicks.count > 16 { recentTicks.removeFirst(recentTicks.count - 16) }
             try aggregateApps(sampleId: id, procDtMs: procDtMs, own: deltas, foreign: foreign, psActive: psActive,
                               topWindow: topWindow, unknownCpuMs: totals?.unknownCpuMs, residualDisk: residualDisk)
+            for (app, ms) in gpuByApp.sorted(by: { $0.key < $1.key }) {
+                var a = AppAgg(); a.gpuMs = ms
+                try appStore.add(sampleId: id, appId: app, a, isFocus: app == focusAppId)
+            }
         }
         if let slow = rec.slow { try writer.insertVolumes(sampleId: id, slow.volumes) }
         samplesWritten += 1
@@ -310,6 +358,7 @@ public final class Pipeline {
             s.id = try episodes.open(startTs: start); s.startTs = start
             summary = s
             hangApps = []
+            captureRequest = try makeCaptureRequest(episodeId: s.id, ts: tick.wallMs, scores: scores)
         }
         if summary != nil, transition.map({ if case .closed = $0 { return false } else { return true } }) ?? true {
             let present = session.map { $0.idleSeconds < thresholds.presentIdleSeconds && $0.displayOn && !$0.locked } ?? true
@@ -339,6 +388,52 @@ public final class Pipeline {
         pendingBlame.append((s.id, s.startTs, endTs, means, hangApps, now + 60_000))
     }
 
+    /// The processes worth a closer look when an episode opens: the busiest and the largest of
+    /// the ones we can read, from the latest sweep.
+    private func makeCaptureRequest(episodeId: Int64, ts: Int64, scores: Scores) throws -> CaptureRequest {
+        let dominant = Scores.dimensions.max { scores.value($0) < scores.value($1) } ?? "cpu"
+        guard let own = lastOwn else { return CaptureRequest(episodeId: episodeId, ts: ts, dominant: dominant, cpuTop: [], memTop: []) }
+        func target(_ d: ProcDelta) throws -> CaptureTarget {
+            var name = "pid \(d.pid)"
+            if let procId = procStore.procIds[d.uid] {
+                try db.query("SELECT e.name FROM process p JOIN executable e USING (exe_id) WHERE p.proc_id = ?", [procId]) { name = $0.text(0) }
+            }
+            return CaptureTarget(pid: d.pid, name: name, cpuShare: Double(d.cpuMs) / Double(max(own.dtMs, 1)), footprint: d.footprint)
+        }
+        let candidates = own.deltas.filter { $0.pid != own.selfPid }
+        let cpu = candidates.filter { $0.cpuMs > 0 }.sorted { ($0.cpuMs, $1.uid) > ($1.cpuMs, $0.uid) }.prefix(5)
+        let mem = candidates.sorted { ($0.footprint, $1.uid) > ($1.footprint, $0.uid) }.prefix(3)
+        return CaptureRequest(episodeId: episodeId, ts: ts, dominant: dominant, cpuTop: try cpu.map(target), memTop: try mem.map(target))
+    }
+
+    /// One `short_lived` event per app whose processes started the churn, so blame can move
+    /// unattributed CPU to it. Groups whose starter is unknown are recorded without an app.
+    private func recordShortLived(_ scan: ShortLivedScan, ts: Int64) throws {
+        struct Sum { var count = 0; var aliveMs: Int64 = 0, cpuMs: Int64 = 0; var parent = ""; var top: [(String, Int)] = [] }
+        var byApp: [Int64: Sum] = [:]
+        for g in scan.groups {
+            let app = procStore.uidByPidLive[g.parentPid].flatMap { procStore.appIdByUid[$0] } ?? 0
+            var s = byApp[app] ?? Sum()
+            s.count += g.count; s.aliveMs += g.aliveMs; s.cpuMs += g.cpuMs
+            if s.parent.isEmpty { s.parent = g.parentName }
+            s.top.append((g.name, g.count))
+            byApp[app] = s
+        }
+        for (app, s) in byApp.sorted(by: { $0.key < $1.key }) {
+            let detail: [String: Any] = [
+                "alive_ms": s.aliveMs, "scan_ms": scan.durationMs, "cpu_ms": s.cpuMs, "started_by": s.parent,
+                "births": scan.births, "scan_cpu_ms": scan.costCpuMs,
+                "top": s.top.prefix(5).map { ["name": $0.0, "count": $0.1] as [String: Any] },
+            ]
+            let json = String(decoding: try JSONSerialization.data(withJSONObject: detail, options: [.sortedKeys]), as: UTF8.self)
+            try writer.insertEvent(ts: ts, kind: "short_lived", value: Int64(s.count), detail: json, appId: app == 0 ? nil : app)
+        }
+        if scan.groups.isEmpty {
+            try writer.insertEvent(ts: ts, kind: "short_lived", value: 0,
+                                   detail: #"{"births":\#(scan.births),"scan_cpu_ms":\#(scan.costCpuMs),"scan_ms":\#(scan.durationMs)}"#)
+        }
+    }
+
     private func scoreInput(tick: Tick, reading sys: SystemReading, delta d: SystemDelta, session: SessionReading?) -> ScoreInput {
         let dtMs = Double(max(tick.dtNs / 1_000_000, 1))
         let pCores = Double(max(host.coreIsPerformance.filter { $0 }.count, 1))
@@ -353,6 +448,7 @@ public final class Pipeline {
         if let v = lastSlow?.volumes.first(where: { $0.mount == "/" }) ?? lastSlow?.volumes.first, v.total > 0 {
             x.diskFreePct = Double(v.free) / Double(v.total) * 100
         }
+        x.gpuUtilPct = sys.gpuUtilPct.map(Double.init)
         x.thermalLevel = session?.thermalLevel ?? lastSlow?.thermalLevel ?? 0
         if let hang = lastHang {
             x.hangAgeSeconds = Double(tick.wallMs - hang.ts) / 1000
@@ -371,6 +467,7 @@ public final class Pipeline {
         lastTopMonoNs = nil; lastSweepMonoNs = nil
         busyMsSinceSweep = 0; diskReadSinceSweep = 0; diskWriteSinceSweep = 0; busyCoversSweep = false
         recentTicks.removeAll()
+        gpuPrev = nil; lastOwn = nil
     }
 
     // MARK: - Apps

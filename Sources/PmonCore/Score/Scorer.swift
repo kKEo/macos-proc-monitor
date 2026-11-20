@@ -18,13 +18,15 @@ public struct ScoreInput: Equatable, Sendable {
     /// Seconds since the latest hang report, and whether it named the focused app.
     public var hangAgeSeconds: Double?
     public var hangIsFocus = false
+    /// GPU device utilisation, percent. Nil when the GPU collector is off.
+    public var gpuUtilPct: Double?
     public init() {}
 }
 
 /// Six sub-scores (0...100) and the sluggishness index.
 public struct Scores: Equatable, Sendable {
     public var cpu = 0, mem = 0, disk = 0, thermal = 0, ui = 0
-    /// Nil until a GPU collector exists.
+    /// Nil when the GPU collector is off.
     public var gpu: Int?
 
     /// The index is the *maximum* sub-score: one saturated resource makes the machine slow,
@@ -51,10 +53,11 @@ public struct Scorer: Sendable {
     public var thresholds: Thresholds
     private var thrashHistory: [Double] = []
     private var queueHistory: [Double] = []
+    private var gpuHistory: [Double] = []
 
     public init(thresholds: Thresholds = Thresholds()) { self.thresholds = thresholds }
 
-    public mutating func reset() { thrashHistory.removeAll(); queueHistory.removeAll() }
+    public mutating func reset() { thrashHistory.removeAll(); queueHistory.removeAll(); gpuHistory.removeAll() }
 
     /// Linear map of `x` from [low, high] onto [0, max], clamped. Works for descending ranges too.
     static func ramp(_ x: Double, _ low: Double, _ high: Double, max: Double = 100) -> Double {
@@ -88,6 +91,12 @@ public struct Scorer: Sendable {
         s.disk = Int(max(queue, free).rounded())
 
         s.thermal = Int(t.thermalScores[min(max(x.thermalLevel, 0), t.thermalScores.count - 1)].rounded())
+
+        if let gpu = x.gpuUtilPct {
+            s.gpu = Int(Self.ramp(Self.median3(&gpuHistory, gpu), t.gpuLow, t.gpuHigh).rounded())
+        } else {
+            gpuHistory.removeAll()
+        }
 
         if let age = x.hangAgeSeconds, age <= t.hangSeconds {
             s.ui = x.hangIsFocus ? 100 : Int(t.uiOtherAppScore.rounded())

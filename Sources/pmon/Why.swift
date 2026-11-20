@@ -100,6 +100,10 @@ func describe(_ b: Blame) -> String {
     switch b.dim {
     case "cpu":
         if b.role == "victim" { return "spent \(Fmt.num(d["wait_s"] ?? 0)) s waiting for a core" }
+        if let n = d["short_lived_count"] {
+            let churn = "started short-lived processes that used the CPU (\(Fmt.num(n)) seen in a scan)"
+            return d["cpu_pct"] == nil ? churn : "used \(Fmt.num(d["cpu_pct"] ?? 0)) % of a core itself and \(churn)"
+        }
         return "used \(Fmt.num(d["cpu_pct"] ?? 0)) % of a core (peak \(Fmt.num(d["peak_cpu_pct"] ?? 0)) %)"
     case "memory":
         if b.role == "victim" { return "had \(Fmt.num(d["pageins"] ?? 0)) page-ins while holding little memory itself" }
@@ -108,6 +112,7 @@ func describe(_ b: Blame) -> String {
         return parts.joined(separator: " and ")
     case "disk": return "read and wrote \(Fmt.size(mb: d["disk_mb"] ?? 0)) (\(Fmt.num(d["mb_per_s"] ?? 0)) MB/s)"
     case "thermal": return "used \(Fmt.num(d["energy_mwh"] ?? 0, 1)) mWh in the minutes before and during"
+    case "gpu": return "used \(Fmt.num(d["gpu_pct"] ?? 0)) % of the GPU's time"
     case "ui": return "was reported unresponsive by the system"
     default: return ""
     }
@@ -150,6 +155,32 @@ struct Why: ParsableCommand {
             return
         }
         print(Why.explain(e, try loadBlame(database, episode: e.id), now: now))
+        let evidence = try Why.evidence(database, e, now: now)
+        if !evidence.isEmpty { print(evidence.joined(separator: "\n")) }
+    }
+
+    /// What the optional collectors found: short-lived processes and capture files.
+    static func evidence(_ db: Database, _ e: Episode, now: Int64) throws -> [String] {
+        var out: [String] = []
+        let end = e.end ?? now
+        try db.query("""
+            SELECT v.value, v.detail, a.name FROM event v LEFT JOIN app a USING (app_id)
+            WHERE v.kind = 'short_lived' AND v.value >= 10 AND v.ts > ? AND v.ts <= ? ORDER BY v.value DESC LIMIT 3
+            """, [e.start - 30_000, end + 120_000]) { r in
+            let d = (r.optText(1).flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) } as? [String: Any]) ?? [:]
+            let top = ((d["top"] as? [[String: Any]]) ?? []).prefix(3).map { "\($0["count"] ?? 0) x \($0["name"] ?? "?")" }
+            let process = (d["started_by"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            let starter = [process, r.optText(2).map { process == nil || process == $0 ? $0 : "(\($0))" }].compactMap { $0 }.joined(separator: " ")
+
+            out.append("Short-lived processes: \(top.joined(separator: ", ")), started by \(starter.isEmpty ? "an unknown process" : starter).")
+        }
+        let labels = ["stack": "Call stacks", "procs": "Threads", "footprint": "Memory", "network": "Network"]
+        try db.query("SELECT kind, summary, path FROM capture WHERE episode_id = ? ORDER BY capture_id", [e.id]) { r in
+            let path = r.text(2)
+            let file = FileManager.default.fileExists(atPath: path) ? path : "file expired"
+            out.append("\(labels[r.text(0)] ?? r.text(0)): \(r.optText(1) ?? "")\n    \(file)")
+        }
+        return out.isEmpty ? [] : ["", "Evidence:"] + out.map { "  " + $0 }
     }
 
     /// The whole explanation as text.

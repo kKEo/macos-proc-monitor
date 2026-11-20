@@ -79,7 +79,8 @@ struct Writer {
     }
 
     func insertSystem(sampleId: Int64, tick: Tick, reading r: SystemReading, delta d: SystemDelta, slow: SlowReading?,
-                      procs: ProcTotals?, session: SessionReading? = nil, focusAppId: Int64? = nil, scores: Scores? = nil) throws {
+                      procs: ProcTotals?, session: SessionReading? = nil, focusAppId: Int64? = nil, scores: Scores? = nil,
+                      diskProbeUs: Int? = nil) throws {
         let cols: [(String, Any?)] = [
             ("s_cpu", scores?.cpu), ("s_mem", scores?.mem), ("s_disk", scores?.disk), ("s_thermal", scores?.thermal),
             ("s_gpu", scores?.gpu), ("s_ui", scores?.ui), ("slug_index", scores?.index),
@@ -92,6 +93,7 @@ struct Writer {
             ("sample_id", sampleId),
             ("cpu_user_ms", d.cpuUserMs), ("cpu_sys_ms", d.cpuSysMs), ("cpu_idle_ms", d.cpuIdleMs),
             ("p_busy_ms", d.pBusyMs), ("e_busy_ms", d.eBusyMs),
+            ("gpu_util_pct", r.gpuUtilPct), ("disk_probe_ms", diskProbeUs.map { Double($0) / 1000 }),
             ("load1", r.load1), ("canary_late_ms", Double(tick.lateNs) / 1e6),
             ("mem_free", Int64(r.vm.freePages) * pageSize), ("mem_active", Int64(r.vm.activePages) * pageSize),
             ("mem_inactive", Int64(r.vm.inactivePages) * pageSize), ("mem_wired", Int64(r.vm.wiredPages) * pageSize),
@@ -110,6 +112,11 @@ struct Writer {
         ]
         let sql = "INSERT INTO sys_sample (\(cols.map { $0.0 }.joined(separator: ", "))) VALUES (\(cols.map { _ in "?" }.joined(separator: ", ")))"
         try db.run(sql, cols.map { $0.1 })
+    }
+
+    func insertCapture(ts: Int64, _ c: CaptureResult, procId: Int64?) throws {
+        try db.run("INSERT INTO capture (ts, episode_id, kind, proc_id, path, bytes, summary, cost_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                   [ts, c.episodeId, c.kind, procId, c.path, c.bytes, c.summary, c.costMs])
     }
 
     func insertVolumes(sampleId: Int64, _ volumes: [VolumeReading]) throws {

@@ -24,7 +24,12 @@ struct BlameRow {
 ///   ten minutes leading up to it. Holding memory and having just grabbed it both count.
 /// - disk: share of bytes read and written.
 /// - thermal: share of energy over the five minutes before and during the episode (heat lags).
+/// - gpu: share of GPU time, when the per-process GPU collector was running.
 /// - ui: the app named in a hang report.
+///
+/// CPU that no process accounts for is normally left with "kernel and short-lived processes".
+/// When a short-lived process scan ran, the part of it that the scan explains is moved to the
+/// apps that started those processes (low confidence).
 ///
 /// Victims: in a memory episode the app with the most page-ins is often the one being hurt,
 /// not the one causing harm; in a CPU episode the same holds for an app that mostly waits.
@@ -36,7 +41,7 @@ struct BlameCalculator {
     private struct AppWindow {
         var cpuMs = 0.0, weightedCpu = 0.0, waitMs = 0.0
         var footprintSum = 0.0, footprintSamples = 0.0, footprintMax = 0.0
-        var pageins = 0.0, disk = 0.0, energy = 0.0
+        var pageins = 0.0, disk = 0.0, energy = 0.0, gpu = 0.0
         var fidelity = 0
         var peakCpuShare = 0.0, peakDisk = 0.0
     }
@@ -54,7 +59,7 @@ struct BlameCalculator {
 
         try db.query("""
             SELECT x.app_id, x.cpu_ms, x.cpu_fg_ms, x.cpu_util_ms, x.cpu_bg_ms, x.runnable_ms, x.footprint, x.d_pageins,
-                   COALESCE(x.d_disk_read, 0) + COALESCE(x.d_disk_write, 0), x.fidelity, s.proc_dt_ms
+                   COALESCE(x.d_disk_read, 0) + COALESCE(x.d_disk_write, 0), x.fidelity, s.proc_dt_ms, x.d_gpu_ms
             FROM app_sample x JOIN sample s USING (sample_id) WHERE s.ts > ? AND s.ts <= ?
             """, [start, lastTs]) { r in
             var a = apps[r.int(0)] ?? AppWindow()
@@ -72,6 +77,7 @@ struct BlameCalculator {
             a.fidelity = max(a.fidelity, Int(r.int(9)))
             if r.int(10) > 0 { a.peakCpuShare = max(a.peakCpuShare, cpu / r.double(10)) }
             a.peakDisk = max(a.peakDisk, r.double(8))
+            a.gpu += r.double(11)
             apps[r.int(0)] = a
         }
 
@@ -93,6 +99,7 @@ struct BlameCalculator {
         let totalHeld = held.values.reduce(0, +)
         let totalGrowth = growth.values.reduce(0, +), totalPageins = total { $0.pageins }
         let totalDisk = total { $0.disk }, totalEnergy = energy.values.reduce(0, +)
+        let totalGpu = total { $0.gpu }
         let windowMs = max(Double(lastTs - start), 1)
 
         var rows: [BlameRow] = []
@@ -136,11 +143,54 @@ struct BlameCalculator {
                 // Energy is only known for natively read processes, so shares are among those.
                 add(app, "thermal", e / totalEnergy, confidence: min(confidence(a), 1), peak: nil, ["energy_mwh": e / 3.6e6])
             }
+            if (meanScores["gpu"] ?? 0) >= t.minDimensionScore, totalGpu > 0, a.gpu > 0 {
+                add(app, "gpu", a.gpu / totalGpu, confidence: 1, peak: nil, ["gpu_pct": a.gpu / windowMs * 100])
+            }
         }
+        try foldShortLived(into: &rows, start: start, end: lastTs, cpuWeight: (meanScores["cpu"] ?? 0) / 100)
         if (meanScores["ui"] ?? 0) >= t.minDimensionScore {
             for app in Set(hangApps) { add(app, "ui", 1.0 / Double(Set(hangApps).count), confidence: 2, peak: nil, [:]) }
         }
         return rows.sorted { ($0.score, $0.share, Double($1.appId)) > ($1.score, $1.share, Double($0.appId)) }
+    }
+
+    /// Move the part of the unattributed CPU share that a short-lived process scan explains to
+    /// the apps that started those processes.
+    private func foldShortLived(into rows: inout [BlameRow], start: Int64, end: Int64, cpuWeight: Double) throws {
+        guard let u = rows.firstIndex(where: { $0.dim == "cpu" && $0.role == "culprit" && $0.confidence == 0 && $0.detail["cpu_pct"] != nil }),
+              let unattributed = try db.scalarInt("SELECT app_id FROM app WHERE key = 'system.unattributed'"),
+              rows[u].appId == unattributed else { return }
+        // Cores' worth of short-lived processes during the scans, per app that started them: their
+        // measured CPU where it could be read (a lower bound), else the time they existed (an upper bound).
+        var alive: [Int64: Double] = [:], scanned: [Int64: Double] = [:], count: [Int64: Double] = [:]
+        try db.query("SELECT app_id, value, detail FROM event WHERE kind = 'short_lived' AND app_id IS NOT NULL AND ts > ? AND ts <= ? ORDER BY event_id",
+                     [start - 30_000, end + 60_000]) { r in
+            guard let d = r.optText(2).flatMap({ try? JSONSerialization.jsonObject(with: Data($0.utf8)) }) as? [String: Any],
+                  let aliveMs = (d["alive_ms"] as? NSNumber)?.doubleValue, let s = (d["scan_ms"] as? NSNumber)?.doubleValue, s > 0 else { return }
+            let cpuMs = (d["cpu_ms"] as? NSNumber)?.doubleValue ?? 0
+            alive[r.int(0), default: 0] += cpuMs > 0 ? cpuMs : aliveMs; scanned[r.int(0), default: 0] += s; count[r.int(0), default: 0] += r.double(1)
+        }
+        let rates = alive.compactMap { app, a -> (Int64, Double)? in
+            app == unattributed || a <= 0 ? nil : (app, a / scanned[app]!)
+        }.sorted { $0.0 < $1.0 }
+        let totalRate = rates.reduce(0) { $0 + $1.1 }
+        let unknownRate = (rows[u].detail["cpu_pct"] ?? 0) / 100
+        guard totalRate > 0, unknownRate > 0 else { return }
+        let movable = rows[u].share * min(1, totalRate / unknownRate)
+        for (app, rate) in rates {
+            let moved = movable * rate / totalRate
+            guard moved >= thresholds.minShare else { continue }
+            if let i = rows.firstIndex(where: { $0.appId == app && $0.dim == "cpu" && $0.role == "culprit" }) {
+                rows[i].share += moved; rows[i].score = rows[i].share * cpuWeight
+                rows[i].detail["short_lived_share"] = moved; rows[i].detail["short_lived_count"] = count[app] ?? 0
+            } else {
+                rows.append(BlameRow(appId: app, dim: "cpu", share: moved, score: moved * cpuWeight, role: "culprit", confidence: 0,
+                                     peakValue: nil, detail: ["short_lived_share": moved, "short_lived_count": count[app] ?? 0]))
+            }
+            rows[u].share -= moved
+        }
+        rows[u].score = rows[u].share * cpuWeight
+        if rows[u].share < thresholds.minShare { rows.remove(at: u) }
     }
 
     /// The process of an app that stood out most in a dimension during the window.

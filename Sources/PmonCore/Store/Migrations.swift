@@ -35,6 +35,12 @@ public enum Migrations {
             CREATE TABLE state (key TEXT PRIMARY KEY, value INTEGER NOT NULL) WITHOUT ROWID;
             CREATE INDEX finding_open ON finding(status, kind, app_id);
             """),
+        // 7: optional collectors: what a capture cost, and the disk latency probe.
+        (7, """
+            ALTER TABLE capture ADD COLUMN cost_ms INTEGER;
+            ALTER TABLE sys_sample ADD COLUMN disk_probe_ms REAL;
+            CREATE INDEX capture_episode ON capture(episode_id);
+            """),
     ]
 
     public static var latestVersion: Int { steps.last!.version }

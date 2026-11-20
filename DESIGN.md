@@ -1,6 +1,6 @@
 # pmon — local macOS process activity monitor: design
 
-Status: design, nothing implemented yet. Target: macOS 14+ on Apple Silicon (developed on macOS 26.2, MacBook Air, 4P+4E cores, 8 GB RAM).
+Status: phases 0–7 implemented (see PLAN.md); "as built" notes mark where the code differs from the design. Target: macOS 14+ on Apple Silicon (developed on macOS 26.2, MacBook Air, 4P+4E cores, 8 GB RAM).
 
 ## 1. Goal
 
@@ -248,6 +248,28 @@ Each is individually switchable and has a mode: `off`, `triggered` (only during 
 The three helper-only collectors each have an unprivileged stand-in: the OS's own hang and spin reports in `DiagnosticReports` (readable without root, verified), the thermal pressure notifications, and the fast process-birth scan.
 
 Triggered captures share one budget: at most one capture set per episode, at most six per hour, never while on battery below 20 %. Capture output goes to compressed files next to the database; the database stores only a reference.
+
+**As built (phase 7).** Nine switches under `collectors` in the configuration, each `off`, `triggered` or `always`; `pmon config` lists them with the cost measured on this machine and `pmon config set` changes one and restarts the daemon. Only `gpu` (device utilisation, 0.1 ms per reading) is on by default.
+
+| Collector | What was built | Measured |
+|---|---|---|
+| `stack` | `sample <pid> 3` on the busiest readable process when an episode opens, if it uses at least 20 % of a core. Summary: the functions most often on top of the stack, waiting frames excluded | 24 KB compressed; 11 s of wall time on a saturated machine |
+| `threads` | For the five busiest readable processes: per-thread CPU over one second, thread count, open files, and arguments if `args` is on. One JSON file | 1.3 s wall, about 1 KB |
+| `footprint` | `footprint <pid>` on the largest readable process, in episodes where memory is the highest score | tested on a child process; no real memory episode yet |
+| `shortLived` | Pid-list comparison every 50 ms for 10 s (bounded by time, not by count), started when at least 0.25 of a core is unattributed; at most once per five minutes in `triggered` mode | 96 ms of CPU per scan |
+| `gpu` | Device utilisation on every system sample; scored 0 at 70 %, 100 at 98 %, on the median of three samples | 0.10 ms per reading |
+| `gpuProcess` | GPU time per process from the accelerator's client entries, turned into `app_sample.d_gpu_ms`; blame for the `gpu` dimension is the share of GPU time | 0.61 ms per reading |
+| `network` | One `nettop` run of two seconds per episode, stored as a capture with the top talkers. Not a continuous per-process metric: `nettop` costs about 1.4 s of CPU per run | — |
+| `diskProbe` | One uncached 16 KB read from a 1 MB scratch file, once a minute, in `sys_sample.disk_probe_ms` | 2.4 ms |
+| `args` | Arguments in the `threads` capture only; never stored in the database | — |
+
+Differences from the table above: file-descriptor counts are part of the `threads` capture rather than a five-minute collector; unified log mining was not built; per-process GPU time is stored per app, not per process.
+
+*Purity.* Captures and scans run outside the pipeline, on their own queue and thread. Their results travel on the next tick record (`captures`, `shortLived`, `gpu`), so the pipeline writes the `capture` rows and `short_lived` events, and a replay reproduces them. The pipeline in turn hands out a capture request when an episode opens and the latest unattributed CPU share; the daemon applies the budget.
+
+*Short-lived processes and blame.* A process that lives for less than the scan interval is seen only by chance, but the chance is proportional to its lifetime, so sightings per executable are a fair sample of where the time went. Each process is attributed to its nearest ancestor that predates the scan, and one event is written per app. When blame is computed, the part of the unattributed CPU share that the scans explain (measured CPU of the short-lived processes where readable, otherwise the time they existed) is moved to those apps, marked with low confidence. Live check with a fork storm of 100 processes a second: 2,364 `bash` processes found, 79 % of the episode moved from "kernel and short-lived processes" to the app that started them.
+
+*Captures.* Files are gzip-compressed, mode 0600, in `captures/` next to the database. Rows expire with the episode evidence (30 days); the daemon deletes files of that age hourly, and the oldest files beyond a 500 MB cap.
 
 ## 6. What gets stored per sweep
 

@@ -56,7 +56,15 @@ do {
     topStream?.start()
     let diagReports = DiagReportWatcher()
     diagReports.start()
-    let collectors = LiveCollectors(topStream: topStream, session: SessionCollector(), diagReports: diagReports)
+    let captureDir = PmonPaths.captures(forDatabase: dbPath)
+    let captures = CaptureManager(dir: captureDir, config: config.collectors)
+    let scanner = ShortLivedScanner()
+    let collectors = LiveCollectors(topStream: topStream, session: SessionCollector(), diagReports: diagReports,
+                                    collectors: config.collectors, captures: captures, scanner: scanner,
+                                    diskProbe: DiskProbe(path: captureDir + "/probe.bin"))
+    var lastBattery: Int?
+    var lastScanMono: UInt64 = 0
+    var lastExpiryMono: UInt64?
     let cadencePolicy = CadencePolicy(config: config)
     var cadence = cadencePolicy.decide(session: nil)
 
@@ -72,6 +80,25 @@ do {
             try recorder?.append(rec)
             try pipeline.ingest(rec)
             failures = 0
+            // Optional collectors: captures for a newly opened episode, and a scan for short-lived
+            // processes when CPU goes unattributed. Both run off this queue.
+            if let pct = rec.slow?.batteryPct { lastBattery = pct }
+            if let req = pipeline.takeCaptureRequest() {
+                captures.submit(req, onBattery: rec.session?.onBattery ?? false, batteryPct: lastBattery)
+            }
+            if let share = pipeline.takeUnknownCpuShare(), config.collectors.shortLived != .off,
+               share >= config.collectors.shortLivedCpuShare, !scanner.isRunning {
+                // Triggered: at most one scan every five minutes. Always: every thirty seconds while the condition holds.
+                let gapNs: UInt64 = config.collectors.shortLived == .always ? 30_000_000_000 : 300_000_000_000
+                if lastScanMono == 0 || tick.monoNs - lastScanMono >= gapNs {
+                    lastScanMono = tick.monoNs
+                    scanner.start()
+                }
+            }
+            if rec.slow != nil, lastExpiryMono.map({ tick.monoNs - $0 >= 3_600_000_000_000 }) ?? true {
+                lastExpiryMono = tick.monoNs
+                captures.expire(maxAgeDays: config.retention.episodeDays)
+            }
             // Cadence: sample less when nobody is watching (display off, user idle, low power), and
             // stretch the process sweep further while the daemon itself is over budget.
             let wanted = cadencePolicy.decide(session: rec.session ?? nil, fast: pipeline.wantsFastCadence)

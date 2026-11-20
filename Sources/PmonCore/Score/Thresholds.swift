@@ -30,6 +30,9 @@ public struct Thresholds: Codable, Equatable, Sendable {
     /// Score per thermal level: nominal, fair, serious, critical.
     public var thermalScores = [0.0, 20.0, 70.0, 100.0]
 
+    /// GPU device utilisation in percent, median of the last three samples.
+    public var gpuLow = 70.0, gpuHigh = 98.0
+
     /// A hang report for the focused app scores 100 for this long; for another app, `uiOtherAppScore`.
     public var hangSeconds = 30.0, uiOtherAppScore = 50.0
 
@@ -89,6 +92,7 @@ public struct Thresholds: Codable, Equatable, Sendable {
             value.queueLow = try d(.queueLow); value.queueHigh = try d(.queueHigh)
             value.diskFreeHighPct = try d(.diskFreeHighPct); value.diskFreeLowPct = try d(.diskFreeLowPct); value.diskFreeMax = try d(.diskFreeMax)
             value.thermalScores = try c.decode([Double].self, forKey: .thermalScores)
+            value.gpuLow = try d(.gpuLow); value.gpuHigh = try d(.gpuHigh)
             value.hangSeconds = try d(.hangSeconds); value.uiOtherAppScore = try d(.uiOtherAppScore)
             value.openAt = try i(.openAt); value.closeAt = try i(.closeAt)
             value.openNeeded = try i(.openNeeded); value.openWindow = try i(.openWindow)
@@ -106,6 +110,6 @@ public struct Thresholds: Codable, Equatable, Sendable {
         case queueLow, queueHigh, diskFreeHighPct, diskFreeLowPct, diskFreeMax, thermalScores, hangSeconds, uiOtherAppScore
         case openAt, closeAt, openNeeded, openWindow, calmSeconds, presentIdleSeconds
         case qosWeightUtility, qosWeightBackground, memoryHoldWeight, memoryGrowthWeight, memoryLeadSeconds, thermalLeadSeconds
-        case minShare, minDimensionScore
+        case minShare, minDimensionScore, gpuLow, gpuHigh
     }
 }

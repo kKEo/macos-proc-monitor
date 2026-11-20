@@ -59,12 +59,16 @@ struct Retention {
         try db.run("DELETE FROM sys_rollup_1h WHERE bucket_ts < ?", [now - Int64(policy.hourRollupDays * Double(day))])
         try db.run("DELETE FROM app_rollup_1h WHERE bucket_ts < ?", [now - Int64(policy.hourRollupDays * Double(day))])
 
+        // Capture files expire with the evidence they belong to; the daemon removes the files.
+        try db.run("DELETE FROM capture WHERE ts < ?", [episodeCutoff])
+
         // Process rows of long-gone processes that nothing refers to any more.
         try db.run("""
             DELETE FROM process WHERE exited_ts IS NOT NULL AND exited_ts < ?
               AND NOT EXISTS (SELECT 1 FROM proc_sample x WHERE x.proc_id = process.proc_id)
               AND NOT EXISTS (SELECT 1 FROM episode_blame b WHERE b.top_proc_id = process.proc_id)
               AND NOT EXISTS (SELECT 1 FROM event v WHERE v.proc_id = process.proc_id)
+              AND NOT EXISTS (SELECT 1 FROM capture c WHERE c.proc_id = process.proc_id)
             """, [rawCutoff])
         return n >= Int64(policy.batchSamples)
     }

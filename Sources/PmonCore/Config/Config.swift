@@ -17,6 +17,8 @@ public enum PmonPaths {
     /// The single-instance lock sits next to the database it protects.
     public static func lock(forDatabase db: String) -> String { db + ".lock" }
     public static var log: String { supportDir + "/pmond.log" }
+    /// Capture files live next to the database they belong to.
+    public static func captures(forDatabase db: String) -> String { (db as NSString).deletingLastPathComponent + "/captures" }
     public static var installedDaemon: String { supportDir + "/bin/pmond" }
     public static var launchAgentPlist: String { NSHomeDirectory() + "/Library/LaunchAgents/\(label).plist" }
 
@@ -43,6 +45,8 @@ public struct Config: Codable, Equatable, Sendable {
     public var thresholds = Thresholds()
     /// How long raw samples and rollups are kept.
     public var retention = RetentionPolicy()
+    /// Optional collectors: modes and the capture budget.
+    public var collectors = CollectorConfig()
 
     public init() {}
 
@@ -58,6 +62,7 @@ public struct Config: Codable, Equatable, Sendable {
         relaxWhenIdle = try c.decodeIfPresent(Bool.self, forKey: .relaxWhenIdle) ?? d.relaxWhenIdle
         thresholds = try c.decodeIfPresent(Thresholds.self, forKey: .thresholds) ?? d.thresholds
         retention = try c.decodeIfPresent(RetentionPolicy.self, forKey: .retention) ?? d.retention
+        collectors = try c.decodeIfPresent(CollectorConfig.self, forKey: .collectors) ?? d.collectors
     }
 
     /// Load from `path`; a missing file yields the defaults, a malformed one is an error.
