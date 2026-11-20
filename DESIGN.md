@@ -219,6 +219,10 @@ Slow sample, every 60 s: free space per volume (`statfs`), battery level and cyc
 
 Every sample stores its actual interval length, so rates are always computed from real elapsed time.
 
+**Context as built (phase 4).** Session state (frontmost app, input idle time, lock, display, thermal, power) is read on every system tick rather than through separate notification sources, and changes are turned into `event` rows by the pipeline. A change is therefore seen up to one tick (5 s) late, in exchange for one code path that replays exactly. Only a *regular* application counts as being in focus; when a background agent is frontmost the focus is empty. Diagnostic reports are the exception: they are watched with FSEvents and attached to an app by executable path or name.
+
+**Cadence as built.** Display off or screen locked: one sample a minute and the top child suspended. User idle for five minutes, or on battery in Low Power Mode: a third of the normal rate. The top child is *not* suspended merely because the user is idle, so background activity while away is still attributed.
+
 **Unattributed CPU.** System busy time minus the sum of all process CPU deltas is stored each sweep. A large residual means short-lived processes are being born and dying between sweeps (build tools, shell loops, crash loops). It is the cheap detector for something the sweep cannot see; the expensive fix is in 5.2.
 
 ### 5.2 Optional tier — heavier, off by default
@@ -253,6 +257,14 @@ Storing 560 process rows every 10 s is about 5 million rows a day, nearly all of
 - **`proc_sample` is selective.** A process gets a detail row only if, in this interval, it is in the top 5 of any dimension (CPU, footprint, footprint growth, disk bytes, wakeups, page-ins) or crosses a floor (over 2 % of a core, over 200 MB footprint, over 20 MB growth, over 5 MB disk I/O). A bitmask records which rule selected it.
 - Typical result: 20–40 process rows and 30–60 app rows per sweep.
 
+**As built (phase 4).**
+
+- An app gets its own `app_sample` row when it used at least 0.05 % of a core, did any disk I/O, changed footprint by 1 MB, holds 100 MB or more, or is in focus. Everything else is summed into one synthetic app, `pmon.other` ("idle apps"), so sums still match the system totals. Measured: about 54 app rows and 28 process rows per sweep.
+- Three synthetic apps carry what cannot be pinned on a real one: `pmon.other`, `system.unattributed` (unexplained CPU) and `system.foreign` (device bytes not accounted for by readable processes).
+- Data from the top stream covers an interval that spans several process ticks and arrives after them. Its counters are split across the ticks it overlaps, in proportion to the overlap, by adding to rows already written; point-in-time values (footprint, process count) go to each tick exactly once. App rows for other users' processes are therefore complete up to one top interval behind the present.
+- Process detail rows: top 5 in each of CPU, footprint, footprint growth, disk bytes, wakeups and page-ins, plus anything over 2 % of a core, 200 MB, 20 MB growth or 5 MB of I/O. The thresholds are constants for now, not configuration.
+- Over a live run, the sum of all app rows' CPU matched system busy CPU to 99.9 %.
+
 Counters are stored as **per-interval deltas**, gauges as point values. Rollups are then plain `SUM` and `MAX`, with no counter-reset logic in any report query.
 
 ## 7. From processes to applications
@@ -264,6 +276,15 @@ Reports must say "Chrome", not "Google Chrome Helper (Renderer) pid 4312". Resol
 3. Launchd coalition ID (`PROC_PIDCOALITIONINFO`).
 4. Parent chain up to the first process that resolved by rule 1 or 2. This puts `node` under the terminal or IDE that launched it.
 5. Otherwise the executable itself is the app, of kind `daemon` or `cli`.
+
+**As built (phase 4).**
+
+- The collector reads the outermost `.app` bundle and its `Info.plist` once per bundle; the resolver itself is pure and works only from recorded identities, so a replay attributes identically.
+- A child inherits its parent's app only when the parent belongs to a bundle. Children of a bare executable (a daemon's shell) do not inherit it.
+- Coalition 1 holds the system's own daemons and is never used for attribution. A coalition is claimed by the first bundle process seen in it.
+- Kinds: a bundle is `app`, unless it lives in `/System/Library`, `/Library/Apple` or `/usr`, in which case it is `system` (Dock, Finder, WindowManager). A bare executable is `system` under `/System`, `/usr/libexec`, `/usr/sbin`, `/sbin` (and `kernel_task`), `daemon` when started by launchd, otherwise `cli`.
+- An app's *main process* (for launch and quit events) is an executable directly in `Contents/MacOS`; helpers and extensions deeper in the bundle are not.
+- On this machine: 574 processes resolved to about 400 apps — 409 by executable, 81 by responsible pid, 62 by bundle, 22 by coalition.
 
 Each app has a kind (`app`, `daemon`, `cli`, `system`) so reports can separate "things you can quit" from "things the OS runs". `kernel_task`, `WindowServer`, `mds*`, `backupd` are tagged `system` and reported with an explanation rather than as blame targets — high `kernel_task` usually signals thermal management, not a kernel bug.
 
@@ -418,7 +439,7 @@ CREATE TABLE sys_sample (
   gpu_util_pct INTEGER,
   -- context
   thermal_level INTEGER, on_battery INTEGER, low_power INTEGER, battery_pct INTEGER,
-  user_idle_s INTEGER, display_on INTEGER, focus_app_id INTEGER,
+  user_idle_s INTEGER, display_on INTEGER, screen_locked INTEGER, focus_app_id INTEGER,
   proc_count INTEGER, thread_count INTEGER,
   -- scores
   s_cpu INTEGER, s_mem INTEGER, s_disk INTEGER, s_thermal INTEGER, s_gpu INTEGER, s_ui INTEGER,

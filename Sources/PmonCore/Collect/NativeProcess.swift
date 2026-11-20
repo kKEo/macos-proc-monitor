@@ -95,6 +95,24 @@ public final class NativeProcessCollector {
         if responsible > 0 { id.responsiblePid = responsible }
         var coalition: UInt64 = 0
         if pmon_coalition_id(pid, &coalition) == 0 { id.coalitionId = coalition }
+        if let bundle = bundle(forExecutable: id.path) {
+            id.bundlePath = bundle.path; id.bundleId = bundle.id; id.bundleName = bundle.name
+        }
         return id
+    }
+
+    private var bundleCache: [String: (path: String, id: String?, name: String?)] = [:]
+
+    /// The outermost `.app` bundle that contains `path`, with facts from its Info.plist.
+    /// "Outermost" makes a browser's helper apps resolve to the browser itself.
+    private func bundle(forExecutable path: String) -> (path: String, id: String?, name: String?)? {
+        guard let range = path.range(of: ".app/") else { return nil }
+        let bundlePath = String(path[..<range.lowerBound]) + ".app"
+        if let hit = bundleCache[bundlePath] { return hit }
+        let info = NSDictionary(contentsOfFile: bundlePath + "/Contents/Info.plist")
+        let name = (info?["CFBundleDisplayName"] as? String) ?? (info?["CFBundleName"] as? String)
+        let result = (bundlePath, info?["CFBundleIdentifier"] as? String, name)
+        bundleCache[bundlePath] = result
+        return result
     }
 }

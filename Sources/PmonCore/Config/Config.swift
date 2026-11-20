@@ -28,7 +28,7 @@ public enum PmonPaths {
 }
 
 /// User-tunable settings. Every field has a default, so a missing or partial file is fine.
-public struct Config: Codable, Equatable {
+public struct Config: Codable, Equatable, Sendable {
     public var systemIntervalSeconds: Double = 5
     public var processIntervalSeconds: Double = 10
     public var slowIntervalSeconds: Double = 60

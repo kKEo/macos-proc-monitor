@@ -79,20 +79,20 @@ struct Status: ParsableCommand {
             line("processes", "\(r.int(2)) running, \(r.int(3)) threads in natively readable ones")
             line("contention", "\(fmt(Double(r.int(4)) / procDt, 2)) cores' worth of threads waiting")
         }
-        guard let sampleId else { return }
+        guard sampleId != nil else { return }
 
         // Coverage: how each process is measured, and how fresh the foreign data is.
         let native = try database.scalarInt("SELECT COUNT(*) FROM process WHERE exited_ts IS NULL AND source = 0") ?? 0
         let foreign = try database.scalarInt("SELECT COUNT(*) FROM process WHERE exited_ts IS NULL AND source = 1") ?? 0
         let mode = try database.scalarInt("SELECT value FROM event WHERE kind = 'foreign_source' ORDER BY event_id DESC LIMIT 1")
-        var foreignSample: Int64?, foreignDt = 1.0, foreignAge = ""
+        var foreignDt = 1.0, foreignAge = ""
         try database.query("""
             SELECT s.sample_id, s.ts, CASE WHEN s.flags & 32 THEN s.proc_dt_ms ELSE s.foreign_dt_ms END,
                    y.foreign_cpu_ms, y.unknown_cpu_ms
             FROM sample s JOIN sys_sample y USING (sample_id)
             WHERE y.foreign_cpu_ms IS NOT NULL ORDER BY s.sample_id DESC LIMIT 1
             """) { r in
-            foreignSample = r.int(0); foreignDt = max(Double(r.int(2)), 1)
+            foreignDt = max(Double(r.int(2)), 1)
             foreignAge = ", last reading \(fmt(Double(now - r.int(1)) / 1000, 0)) s ago"
             line("system cpu", "\(pct(Double(r.int(3)), foreignDt)) of a core in other users' processes"
                  + (r.isNull(4) ? "" : ", \(pct(Double(r.int(4)), foreignDt)) unexplained (kernel, short-lived processes)"))
@@ -111,27 +111,41 @@ struct Status: ParsableCommand {
                  + ((level ?? 0) > 0 ? ", self-limiter at level \(level!)" : ""))
         }
 
-        // Busiest processes: natively read ones from the latest sweep, plus other users' processes
-        // from their latest reading, each normalised by the interval it covers.
-        for (title, order) in [("top cpu", "cpu_pct DESC"), ("top memory", "footprint DESC")] {
+        // Session context from the latest sample.
+        try database.query("""
+            SELECT a.name, y.user_idle_s, y.display_on, y.screen_locked
+            FROM sys_sample y LEFT JOIN app a ON a.app_id = y.focus_app_id
+            WHERE y.user_idle_s IS NOT NULL ORDER BY y.sample_id DESC LIMIT 1
+            """) { r in
+            let state = r.int(3) == 1 ? "screen locked" : (r.int(2) == 0 ? "display off" : "last input \(r.int(1)) s ago")
+            let mode = ((try? database.scalarInt("SELECT value FROM event WHERE kind = 'cadence' ORDER BY event_id DESC LIMIT 1")) ?? nil) ?? 0
+            line("session", "\(r.isNull(0) ? "no app in focus" : "in focus: " + r.text(0)), \(state), sampling \(["normal", "relaxed", "minimal"][Int(min(max(mode, 0), 2))])")
+        }
+
+        // Busiest applications over a recent minute. The window ends 40 s ago because data for other
+        // users' processes arrives up to one top interval late.
+        var windowMs = 0.0
+        try database.query("SELECT SUM(proc_dt_ms) FROM sample WHERE proc_dt_ms IS NOT NULL AND ts BETWEEN ? AND ?", [now - 100_000, now - 40_000]) {
+            windowMs = $0.double(0)
+        }
+        guard windowMs > 0 else { return }
+        for (title, order) in [("top cpu", "cpu DESC"), ("top memory", "mem DESC")] {
             var first = true
             try database.query("""
-                SELECT name, pid, cpu_pct, footprint, fidelity FROM (
-                  SELECT e.name name, pr.pid pid, (p.cpu_user_ms + p.cpu_sys_ms) * 100.0 / ? cpu_pct, p.footprint footprint, p.fidelity fidelity
-                  FROM proc_sample p JOIN process pr USING (proc_id) JOIN executable e USING (exe_id)
-                  WHERE p.sample_id = ? AND p.fidelity = 0
-                  UNION ALL
-                  SELECT e.name, pr.pid, (p.cpu_user_ms + p.cpu_sys_ms) * 100.0 / ?, p.footprint, p.fidelity
-                  FROM proc_sample p JOIN process pr USING (proc_id) JOIN executable e USING (exe_id)
-                  WHERE p.sample_id = ? AND p.fidelity > 0
-                ) ORDER BY \(order) LIMIT 6
-                """, [procDt, sampleId, foreignDt, foreignSample ?? -1]) { r in
-                let name = r.text(0).padding(toLength: 28, withPad: " ", startingAt: 0)
+                SELECT a.name, a.kind, SUM(x.cpu_ms) * 100.0 / ? cpu, MAX(x.footprint) mem, MAX(x.proc_count), MAX(x.is_focus), MAX(x.fidelity)
+                FROM app_sample x JOIN sample s USING (sample_id) JOIN app a USING (app_id)
+                WHERE s.ts BETWEEN ? AND ? AND a.key NOT IN ('pmon.other')
+                GROUP BY a.app_id ORDER BY \(order) LIMIT 6
+                """, [windowMs, now - 100_000, now - 40_000]) { r in
+                let name = r.text(0).padding(toLength: 34, withPad: " ", startingAt: 0)
                 let cpu = r.isNull(2) ? "     –" : fmt(r.double(2), 1).leftPad(6)
                 let mem = r.isNull(3) ? "       –" : bytes(r.int(3)).leftPad(8)
-                let text = "\(name) pid \(String(r.int(1)).padding(toLength: 6, withPad: " ", startingAt: 0)) "
-                    + "\(cpu) % cpu  \(mem)\(r.int(4) > 0 ? "  (system)" : "")"
-                line(first ? title : "", text)
+                var tags: [String] = []
+                if r.int(5) == 1 { tags.append("in focus") }
+                if r.text(1) != "app" { tags.append(r.text(1)) }
+                if r.int(4) > 1 { tags.append("\(r.int(4)) processes") }
+                if r.int(6) == 3 { tags.append("estimate") }
+                line(first ? title : "", "\(name) \(cpu) % cpu  \(mem)\(tags.isEmpty ? "" : "  (" + tags.joined(separator: ", ") + ")")")
                 first = false
             }
         }

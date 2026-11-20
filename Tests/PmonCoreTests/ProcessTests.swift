@@ -7,6 +7,10 @@ struct FakeProcs {
     var foreign: [ProcRef] = [ProcRef(pid: 1, uid: 1), ProcRef(pid: 88, uid: 2)]
     private var announced = Set<UInt64>()
     private var nextUid: UInt64 = 100
+    /// Optional app structure: bundle facts and responsible pids, keyed by pid.
+    var bundles: [Int32: (path: String, id: String, name: String)] = [:]
+    var responsible: [Int32: Int32] = [:]
+    var parents: [Int32: Int32] = [:]
 
     @discardableResult
     mutating func spawn(pid: Int32, startNs: UInt64 = 0, footprint: UInt64 = 50 << 20) -> UInt64 {
@@ -42,6 +46,16 @@ struct FakeProcs {
             id.pid = r.pid; id.uid = r.uid; id.own = true; id.userId = 501; id.ppid = 1; id.parentUid = 1
             id.startTsMs = 1_799_000_000_000 + Int64(r.uid) * 1000
             id.path = "/Applications/Fake\(r.pid).app/Contents/MacOS/fake\(r.pid)"; id.name = "fake\(r.pid)"
+            if let b = bundles[r.pid] {
+                id.bundlePath = b.path; id.bundleId = b.id; id.bundleName = b.name
+                id.path = b.path + "/Contents/MacOS/" + id.name
+            } else {
+                id.path = "/opt/tools/fake\(r.pid)"
+            }
+            id.responsiblePid = responsible[r.pid] ?? r.pid
+            if let parentPid = parents[r.pid], let parent = procs.values.first(where: { $0.pid == parentPid }) {
+                id.ppid = parentPid; id.parentUid = parent.uid
+            }
             s.identities.append(id)
         }
         for f in foreign where announced.insert(f.uid).inserted {

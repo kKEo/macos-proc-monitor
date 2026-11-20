@@ -1,7 +1,7 @@
 import Foundation
-import Darwin
 
-/// Turns raw tick records into stored rows: deltas, then one transaction per tick.
+/// Turns raw tick records into stored rows: deltas, attribution, aggregation, then one
+/// transaction per tick.
 ///
 /// The pipeline has no access to collectors or clocks. Everything it knows arrives in a
 /// `TickRecord`, so a live run and a replay of its recording produce identical rows.
@@ -10,23 +10,35 @@ public final class Pipeline {
     private let host: HostInfo
     private let writer: Writer
     private let procStore: ProcStore
+    private let appStore: AppStore
+    private let selection = Selection()
     private var systemDeltas = SystemDeltaEngine()
     private var procDeltas = ProcDeltaEngine()
     private var limiter = SelfLimiter()
     private var topDeltas = TopDeltaEngine()
     private var psDeltas = PsDeltaEngine()
+    private var lastSlow: SlowReading?
+
+    /// Monotonic time of the previous process sweep, and system totals accumulated since then.
+    private var lastSweepMonoNs: UInt64?
+    private var busyMsSinceSweep: Int64 = 0
+    private var diskReadSinceSweep: Int64 = 0, diskWriteSinceSweep: Int64 = 0
+    private var busyCoversSweep = false
+    private var sweeps = 0
+
     /// Cumulative system busy CPU and readable-process CPU over time, to line them up with top samples.
     private var busySeries = CumulativeSeries()
     private var ownSeries = CumulativeSeries()
     private var lastTopMonoNs: UInt64?
-    private var diskBytesSinceSweep: Int64 = 0
-    private var lastSlow: SlowReading?
+    /// Recent process ticks (sample id and the interval each covers), so data that arrives late
+    /// from the top stream can be credited to the ticks it actually belongs to.
+    private var recentTicks: [(id: Int64, start: UInt64, end: UInt64)] = []
 
-    /// Monotonic time of the previous process sweep, and system busy CPU accumulated since then.
-    private var lastSweepMonoNs: UInt64?
-    private var busyMsSinceSweep: Int64 = 0
-    private var busyCoversSweep = false
-    private var sweeps = 0
+    // Context: last observed values, to turn changes into events.
+    private var lastSession: SessionReading?
+    private var lastPressure: Int?
+    private var focusAppId: Int64?
+    private var focusInitialised = false
 
     /// Counts for health reporting.
     public private(set) var ticksIngested = 0
@@ -45,6 +57,7 @@ public final class Pipeline {
         }
         writer = Writer(db: db, bootId: bootId, pageSize: Int64(host.pageSize))
         procStore = try ProcStore(db: db, bootId: bootId)
+        appStore = AppStore(db: db)
     }
 
     public func ingest(_ rec: TickRecord) throws {
@@ -53,39 +66,49 @@ public final class Pipeline {
         try db.transaction { try ingestInTransaction(rec) }
     }
 
+    // MARK: - One tick
+
     private func ingestInTransaction(_ rec: TickRecord) throws {
         let tick = rec.tick
 
-        for note in rec.notes ?? [] {
-            try writer.insertEvent(ts: tick.wallMs, kind: note.kind, value: note.value, detail: note.detail)
-        }
-
         // Dimension rows first: they are valid whether or not this tick yields a sample.
         if let sweep = rec.procs {
-            try procStore.apply(identities: sweep.identities, ts: tick.wallMs)
+            let started = try procStore.apply(identities: sweep.identities, ts: tick.wallMs)
             let present = Set(sweep.procs.map(\.uid)).union(sweep.foreign.map(\.uid))
-            try procStore.markExited(present: present, ts: tick.wallMs)
+            let quit = try procStore.markExited(present: present, ts: tick.wallMs)
+            // The first sweep describes everything already running; that is not a launch.
+            if sweeps > 0 {
+                for s in started { try writer.insertEvent(ts: tick.wallMs, kind: "proc_start", value: nil, detail: nil, appId: s.appId, procId: s.procId) }
+                for q in quit { try writer.insertEvent(ts: tick.wallMs, kind: "proc_exit", value: nil, detail: nil, appId: q.appId, procId: q.procId) }
+            }
             sweeps += 1
             if sweeps % 30 == 0 { try procStore.touchLive(ts: tick.wallMs) }
         }
 
+        for note in rec.notes ?? [] {
+            let target = try (note.exePath != nil || note.procName != nil) ? procStore.lookup(exePath: note.exePath, name: note.procName) : nil
+            try writer.insertEvent(ts: tick.wallMs, kind: note.kind, value: note.value, detail: note.detail,
+                                   appId: target?.appId, procId: target?.procId)
+        }
+        try updateContext(rec, ts: tick.wallMs)
+
         // An interval that spans sleep is not a real interval: drop every baseline so the next
         // tick starts fresh, and leave a flagged marker row so the gap is explained.
         if tick.afterWake {
-            systemDeltas.reset()
-            procDeltas.reset()
-            topDeltas.reset(); psDeltas.reset()
-            busySeries.reset(); ownSeries.reset(); lastTopMonoNs = nil
-            diskBytesSinceSweep = 0
-            if let sweep = rec.procs {            // re-baseline the foreign sources too
-                let uidByPid = Dictionary(sweep.foreign.map { ($0.pid, $0.uid) }, uniquingKeysWith: { a, _ in a })
+            try writer.insertEvent(ts: tick.wallMs, kind: "wake", value: Int64(tick.sleptNs / 1_000_000_000), detail: nil)
+            resetBaselines()
+            if let sys = rec.system {
+                _ = systemDeltas.delta(sys, coreIsPerformance: host.coreIsPerformance)
+                busySeries.anchor(at: tick.monoNs)
+            }
+            if let sweep = rec.procs {
+                _ = procDeltas.deltas(sweep.procs, monoNs: tick.monoNs)
+                ownSeries.anchor(at: tick.monoNs)
+                lastSweepMonoNs = tick.monoNs; busyCoversSweep = true
+                let uidByPid = Self.foreignMap(sweep)
                 if let top = rec.top { _ = topDeltas.deltas(top, uidByPid: uidByPid); lastTopMonoNs = top.monoNs }
                 if let ps = rec.ps { _ = psDeltas.deltas(ps, uidByPid: uidByPid) }
             }
-            if let sys = rec.system { _ = systemDeltas.delta(sys, coreIsPerformance: host.coreIsPerformance) }
-            if let sweep = rec.procs { _ = procDeltas.deltas(sweep.procs, monoNs: tick.monoNs) }
-            lastSweepMonoNs = rec.procs == nil ? nil : tick.monoNs
-            busyMsSinceSweep = 0; busyCoversSweep = rec.procs != nil
             _ = try writer.insertSample(tick: tick, tier: 1, flags: .afterWake)
             samplesWritten += 1
             return
@@ -94,29 +117,34 @@ public final class Pipeline {
         let sysDelta = rec.system.flatMap { systemDeltas.delta($0, coreIsPerformance: host.coreIsPerformance) }
         if let d = sysDelta {
             busyMsSinceSweep += d.cpuUserMs + d.cpuSysMs
-            diskBytesSinceSweep += d.diskRead + d.diskWrite
+            diskReadSinceSweep += d.diskRead; diskWriteSinceSweep += d.diskWrite
             busySeries.add(Double(d.cpuUserMs + d.cpuSysMs), at: tick.monoNs)
         } else {
             busyCoversSweep = false
             if rec.system != nil { busySeries.reset(); busySeries.anchor(at: tick.monoNs) }
         }
 
-        // Process deltas, and the totals that go onto the system sample.
+        // Natively read processes.
         var deltas: [ProcDelta] = []
         var totals: ProcTotals?
         var procDtMs: Int64?
+        var residualDisk: (read: Int64, write: Int64)?
+        let sweepStart = lastSweepMonoNs
         if let sweep = rec.procs {
             deltas = procDeltas.deltas(sweep.procs, monoNs: tick.monoNs).deltas
             if let last = lastSweepMonoNs {
                 procDtMs = Int64((tick.monoNs - last) / 1_000_000)
                 let cpuMs = Int64(deltas.reduce(UInt64(0)) { $0 + $1.cpuNs } / 1_000_000)
-                let ownDisk = deltas.reduce(Int64(0)) { $0 + $1.dDiskRead + $1.dDiskWrite }
                 ownSeries.add(Double(cpuMs), at: tick.monoNs)
+                if busyCoversSweep {
+                    residualDisk = (max(0, diskReadSinceSweep - deltas.reduce(0) { $0 + $1.dDiskRead }),
+                                    max(0, diskWriteSinceSweep - deltas.reduce(0) { $0 + $1.dDiskWrite }))
+                }
                 totals = ProcTotals(procCount: sweep.procs.count + sweep.foreign.count,
                                     threadCount: sweep.procs.reduce(0) { $0 + Int($1.threads) },
                                     waitMs: deltas.reduce(0) { $0 + $1.waitMs },
                                     unattributedCpuMs: busyCoversSweep ? max(0, busyMsSinceSweep - cpuMs) : nil,
-                                    unattributedDiskBytes: busyCoversSweep ? max(0, diskBytesSinceSweep - ownDisk) : nil)
+                                    unattributedDiskBytes: residualDisk.map { $0.read + $0.write })
                 try observeSelfCost(sweep: sweep, deltas: deltas, selfPid: rec.selfPid, procDtMs: procDtMs!, ts: tick.wallMs)
             } else {
                 ownSeries.anchor(at: tick.monoNs)
@@ -127,21 +155,23 @@ public final class Pipeline {
         // Processes of other users: top stream and/or ps, merged into one set of rows.
         var foreign: [ForeignDelta] = []
         var foreignDtMs: Int64?
+        var topWindow: (start: UInt64, end: UInt64)?
+        var psActive = false
         var flags: SampleFlags = backoffLevel > 0 ? .degraded : []
         if let sweep = rec.procs {
-            let uidByPid = Dictionary(sweep.foreign.map { ($0.pid, $0.uid) }, uniquingKeysWith: { a, _ in a })
+            let uidByPid = Self.foreignMap(sweep)
             var rows: [UInt64: ForeignDelta] = [:]
 
-            if let top = rec.top {
-                if let r = topDeltas.deltas(top, uidByPid: uidByPid) {
-                    rows = r.rows; foreignDtMs = r.dtMs; flags.insert(.foreignFresh)
-                }
+            if let top = rec.top, let r = topDeltas.deltas(top, uidByPid: uidByPid) {
+                rows = r.rows; foreignDtMs = r.dtMs; flags.insert(.foreignFresh)
+                if let last = lastTopMonoNs { topWindow = (last, top.monoNs) }
             }
             // ps supplies CPU at the process cadence. While it is active it is the only CPU source,
             // so CPU already reported by ps is not counted again when a top sample arrives.
             let ps = rec.ps.flatMap { psDeltas.deltas($0, uidByPid: uidByPid) }
             if rec.ps == nil { psDeltas.reset() }
             if let ps {
+                psActive = true
                 flags.insert(.foreignCpuFromPs)
                 for uid in rows.keys { rows[uid]!.cpuUserMs = nil; rows[uid]!.cpuSysMs = nil; rows[uid]!.cpuNs = 0 }
                 for (uid, cpu) in ps {
@@ -151,11 +181,12 @@ public final class Pipeline {
                     rows[uid] = d
                 }
             }
-            foreign = Array(rows.values)
+            // Sorted so that ties in the selection, and therefore a replay, come out the same every time.
+            foreign = rows.values.sorted { $0.uid < $1.uid }
 
             // Residual: system busy CPU minus readable processes minus measured foreign processes.
             let foreignCpuMs = Double(foreign.reduce(UInt64(0)) { $0 + $1.cpuNs }) / 1e6
-            if ps != nil, let own = totals, let notOwn = own.unattributedCpuMs {
+            if psActive, let notOwn = totals?.unattributedCpuMs {
                 totals?.foreignCpuMs = Int64(foreignCpuMs.rounded())
                 totals?.unknownCpuMs = notOwn - Int64(foreignCpuMs.rounded())
             } else if let top = rec.top, foreignDtMs != nil, totals != nil {
@@ -169,7 +200,7 @@ public final class Pipeline {
                 }
             }
             if let top = rec.top { lastTopMonoNs = top.monoNs }
-            busyMsSinceSweep = 0; diskBytesSinceSweep = 0; busyCoversSweep = true
+            busyMsSinceSweep = 0; diskReadSinceSweep = 0; diskWriteSinceSweep = 0; busyCoversSweep = true
         }
 
         guard let sys = rec.system, let d = sysDelta else {
@@ -177,21 +208,165 @@ public final class Pipeline {
         }
         let id = try writer.insertSample(tick: tick, tier: rec.procs != nil ? 2 : 1, flags: flags,
                                          procDtMs: procDtMs, foreignDtMs: foreignDtMs)
-        try writer.insertSystem(sampleId: id, tick: tick, reading: sys, delta: d, slow: lastSlow, procs: totals)
-        if procDtMs != nil {
-            for (delta, reason) in ProvisionalSelection.select(deltas, selfPid: rec.selfPid) {
+        try writer.insertSystem(sampleId: id, tick: tick, reading: sys, delta: d, slow: lastSlow, procs: totals,
+                                session: rec.session ?? lastSession, focusAppId: focusAppId)
+
+        if let procDtMs {
+            for (delta, reason) in selection.select(own: deltas, selfPid: rec.selfPid, dtMs: procDtMs) {
                 try procStore.insertSample(sampleId: id, delta, reason: reason)
             }
-        }
-        if !foreign.isEmpty {
             // CPU from ps covers the process interval; everything from top covers the top interval.
-            let cpuDt = flags.contains(.foreignCpuFromPs) ? (procDtMs ?? 10_000) : (foreignDtMs ?? 30_000)
-            for (delta, reason) in ProvisionalSelection.selectForeign(foreign, dtMs: cpuDt) {
+            for (delta, reason) in selection.select(foreign: foreign, dtMs: psActive ? procDtMs : (foreignDtMs ?? 30_000)) {
                 try procStore.insertForeign(sampleId: id, delta, reason: reason)
             }
+            recentTicks.append((id, sweepStart ?? tick.monoNs, tick.monoNs))
+            if recentTicks.count > 16 { recentTicks.removeFirst(recentTicks.count - 16) }
+            try aggregateApps(sampleId: id, procDtMs: procDtMs, own: deltas, foreign: foreign, psActive: psActive,
+                              topWindow: topWindow, unknownCpuMs: totals?.unknownCpuMs, residualDisk: residualDisk)
         }
         if let slow = rec.slow { try writer.insertVolumes(sampleId: id, slow.volumes) }
         samplesWritten += 1
+    }
+
+    private static func foreignMap(_ sweep: ProcSweep) -> [Int32: UInt64] {
+        Dictionary(sweep.foreign.map { ($0.pid, $0.uid) }, uniquingKeysWith: { a, _ in a })
+    }
+
+    private func resetBaselines() {
+        systemDeltas.reset(); procDeltas.reset(); topDeltas.reset(); psDeltas.reset()
+        busySeries.reset(); ownSeries.reset()
+        lastTopMonoNs = nil; lastSweepMonoNs = nil
+        busyMsSinceSweep = 0; diskReadSinceSweep = 0; diskWriteSinceSweep = 0; busyCoversSweep = false
+        recentTicks.removeAll()
+    }
+
+    // MARK: - Apps
+
+    /// Write `app_sample`: every app's activity, complete, so its sums match the system totals.
+    private func aggregateApps(sampleId: Int64, procDtMs: Int64, own: [ProcDelta], foreign: [ForeignDelta], psActive: Bool,
+                               topWindow: (start: UInt64, end: UInt64)?, unknownCpuMs: Int64?,
+                               residualDisk: (read: Int64, write: Int64)?) throws {
+        // Natively read processes: this tick, exact interval.
+        var ownApps: [Int64: AppAgg] = [:]
+        for d in own {
+            guard let app = procStore.appIdByUid[d.uid] else { continue }
+            ownApps[app, default: AppAgg()].add(own: d)
+        }
+        var other = AppAgg()
+        for (app, agg) in ownApps {
+            if agg.significant(dtMs: procDtMs) || app == focusAppId {
+                try appStore.add(sampleId: sampleId, appId: app, agg, isFocus: app == focusAppId)
+            } else {
+                other.add(agg)
+            }
+        }
+        if other.procCount > 0 { try appStore.add(sampleId: sampleId, appId: procStore.otherApp, other, isFocus: false) }
+
+        // Other users' processes. CPU from ps belongs to this tick. Everything from a top sample
+        // covers the top interval, which spans several ticks: it is split across them.
+        var direct: [Int64: AppAgg] = [:], spread: [Int64: AppAgg] = [:]
+        for d in foreign {
+            guard let app = procStore.appIdByUid[d.uid] else { continue }
+            if d.cpuFromPs {
+                var a = AppAgg(); a.cpuMs = (d.cpuUserMs ?? 0) + (d.cpuSysMs ?? 0); a.fidelity = 2
+                direct[app, default: AppAgg()].add(a)
+            }
+            if d.fidelity == 1 {
+                var a = AppAgg(); a.procCount = 1; a.fidelity = 1
+                if !d.cpuFromPs { a.cpuMs = d.cpuUserMs }
+                a.footprint = d.footprint; a.dFootprint = d.dFootprint; a.pageins = d.dPageins; a.wakeups = d.dWakeups
+                spread[app, default: AppAgg()].add(a)
+            }
+        }
+        if let ms = unknownCpuMs, ms > 0 {
+            var a = AppAgg(); a.cpuMs = ms; a.fidelity = 3
+            if psActive { direct[procStore.unattributedApp, default: AppAgg()].add(a) }
+            else { spread[procStore.unattributedApp, default: AppAgg()].add(a) }
+        }
+        if let disk = residualDisk, disk.read + disk.write > 0 {
+            var a = AppAgg(); a.diskRead = disk.read; a.diskWrite = disk.write; a.fidelity = 3
+            direct[procStore.foreignResidualApp, default: AppAgg()].add(a)
+        }
+        for (app, agg) in direct { try appStore.add(sampleId: sampleId, appId: app, agg, isFocus: app == focusAppId) }
+
+        guard !spread.isEmpty else { return }
+        let slices = Self.slices(of: topWindow, over: recentTicks, current: sampleId)
+        let windowMs = topWindow.map { Int64(($0.end - $0.start) / 1_000_000) } ?? procDtMs
+        var otherSpread = AppAgg()
+        for (app, agg) in spread {
+            if agg.significant(dtMs: windowMs) || app == focusAppId || app == procStore.unattributedApp {
+                for s in slices { try appStore.add(sampleId: s.id, appId: app, agg.slice(from: s.from, to: s.to, gauges: s.gauges), isFocus: app == focusAppId) }
+            } else {
+                otherSpread.add(agg)
+            }
+        }
+        if otherSpread.procCount > 0 {
+            for s in slices { try appStore.add(sampleId: s.id, appId: procStore.otherApp, otherSpread.slice(from: s.from, to: s.to, gauges: s.gauges), isFocus: false) }
+        }
+    }
+
+    /// How a top interval divides over the process ticks it overlaps, as cumulative fractions.
+    /// Any part that predates the oldest known tick is shared among the ticks that are known.
+    ///
+    /// `gauges` marks the ticks that should receive point-in-time values (footprint, process
+    /// count): those whose end lies inside the window. A tick straddling two windows gets counter
+    /// shares from both but its gauges from exactly one, so nothing is counted twice.
+    static func slices(of window: (start: UInt64, end: UInt64)?, over ticks: [(id: Int64, start: UInt64, end: UInt64)],
+                       current: Int64) -> [(id: Int64, from: Double, to: Double, gauges: Bool)] {
+        guard let w = window else { return [(current, 0, 1, true)] }
+        var parts: [(id: Int64, len: Double, gauges: Bool)] = []
+        for t in ticks {
+            let lo = max(t.start, w.start), hi = min(t.end, w.end)
+            if hi > lo { parts.append((t.id, Double(hi - lo), t.end > w.start && t.end <= w.end)) }
+        }
+        let total = parts.reduce(0) { $0 + $1.len }
+        guard total > 0 else { return [(current, 0, 1, true)] }
+        var out: [(id: Int64, from: Double, to: Double, gauges: Bool)] = []
+        var acc = 0.0
+        for (i, p) in parts.enumerated() {
+            let next = i == parts.count - 1 ? 1.0 : acc + p.len / total
+            out.append((p.id, acc, next, p.gauges))
+            acc = next
+        }
+        return out
+    }
+
+    // MARK: - Context and events
+
+    /// Turn changes in session state and memory pressure into events, and keep the focus span current.
+    private func updateContext(_ rec: TickRecord, ts: Int64) throws {
+        if let sys = rec.system {
+            if let last = lastPressure, last != sys.pressureLevel {
+                try writer.insertEvent(ts: ts, kind: "pressure", value: Int64(sys.pressureLevel), detail: nil)
+            }
+            lastPressure = sys.pressureLevel
+        }
+        guard let s = rec.session else { return }
+
+        if let p = lastSession {
+            if p.thermalLevel != s.thermalLevel { try writer.insertEvent(ts: ts, kind: "thermal", value: Int64(s.thermalLevel), detail: nil) }
+            if p.onBattery != s.onBattery { try writer.insertEvent(ts: ts, kind: "power", value: s.onBattery ? 1 : 0, detail: nil) }
+            if p.lowPower != s.lowPower { try writer.insertEvent(ts: ts, kind: "low_power", value: s.lowPower ? 1 : 0, detail: nil) }
+            if p.displayOn != s.displayOn { try writer.insertEvent(ts: ts, kind: "display", value: s.displayOn ? 1 : 0, detail: nil) }
+            if p.locked != s.locked { try writer.insertEvent(ts: ts, kind: "lock", value: s.locked ? 1 : 0, detail: nil) }
+        }
+        lastSession = s
+
+        // Focus: the app of the frontmost regular application. A frontmost process we have not
+        // identified yet (it started since the last sweep) leaves the focus unchanged for now.
+        var newFocus = focusAppId
+        if let pid = s.frontPid {
+            if let uid = procStore.uidByPidLive[pid], let app = procStore.appIdByUid[uid] { newFocus = app }
+        } else {
+            newFocus = nil
+        }
+        if !focusInitialised || newFocus != focusAppId {
+            // On the first reading this also closes a span left open by a previous run.
+            try writer.setFocus(appId: newFocus, ts: ts)
+            if focusInitialised { try writer.insertEvent(ts: ts, kind: "focus", value: nil, detail: nil, appId: newFocus) }
+            focusAppId = newFocus
+            focusInitialised = true
+        }
     }
 
     /// Feed the self-limiter and record a change of level as an event.
@@ -202,49 +377,5 @@ public final class Pipeline {
         let share = limiter.cpuShare.map { String(format: "%.4f", $0) } ?? "null"
         try writer.insertEvent(ts: ts, kind: "collector_backoff", value: Int64(limiter.level),
                                detail: #"{"level":\#(limiter.level),"sweep_ms":\#(String(format: "%.1f", sweepMs)),"cpu_share":\#(share)}"#)
-    }
-}
-
-/// Reads the live machine: runs the collectors that are due on a tick.
-public final class LiveCollectors {
-    private let system = SystemCollector()
-    private let slow = SlowCollector()
-    private let processes = NativeProcessCollector()
-    private let ps = PsCollector()
-    private let topStream: TopStream?
-    private let selfPid = getpid()
-    private var announcedPsOnly = false
-
-    /// Ask for `ps` on every process sweep, for finer CPU resolution of foreign processes
-    /// than the top stream gives. Used while a slowdown is being investigated.
-    public var psBurst = false
-
-    /// `topStream` nil means foreign processes are covered by `ps` alone.
-    public init(topStream: TopStream? = nil) {
-        self.topStream = topStream
-    }
-
-    public func collect(for tick: Tick) -> TickRecord {
-        var rec = TickRecord(tick: tick)
-        if tick.tiers.contains(.system) { rec.system = system.collect() }
-        if tick.tiers.contains(.process) {
-            let sweep = processes.collect()
-            rec.procs = sweep; rec.selfPid = selfPid
-            let foreignPids = Set(sweep.foreign.map(\.pid))
-            if let sample = topStream?.take() {
-                rec.top = TopSample(monoNs: sample.monoNs, rows: sample.rows.filter { foreignPids.contains($0.pid) })
-            }
-            if psBurst || topStream == nil || topStream!.needsFallback {
-                rec.ps = ps.collect(pids: sweep.foreign.map(\.pid))
-            }
-            var notes = topStream?.takeNotes() ?? []
-            if topStream == nil, !announcedPsOnly {
-                announcedPsOnly = true
-                notes.append(CollectorNote(kind: "foreign_source", value: 2, detail: #"{"mode":"ps","reason":"top stream disabled in configuration"}"#))
-            }
-            if !notes.isEmpty { rec.notes = notes }
-        }
-        if tick.tiers.contains(.slow) { rec.slow = slow.collect() }
-        return rec
     }
 }

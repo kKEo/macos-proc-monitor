@@ -65,13 +65,21 @@ struct Writer {
         return db.lastInsertRowId
     }
 
-    func insertEvent(ts: Int64, kind: String, value: Int64?, detail: String?) throws {
-        try db.run("INSERT INTO event (ts, kind, value, detail) VALUES (?, ?, ?, ?)", [ts, kind, value, detail])
+    func insertEvent(ts: Int64, kind: String, value: Int64?, detail: String?, appId: Int64? = nil, procId: Int64? = nil) throws {
+        try db.run("INSERT INTO event (ts, kind, app_id, proc_id, value, detail) VALUES (?, ?, ?, ?, ?, ?)", [ts, kind, appId, procId, value, detail])
+    }
+
+    /// Close the open focus span, if any, and open a new one for `appId` (nil: nothing in focus).
+    func setFocus(appId: Int64?, ts: Int64) throws {
+        try db.run("UPDATE focus_span SET end_ts = ? WHERE end_ts IS NULL", [ts])
+        if let appId { try db.run("INSERT OR REPLACE INTO focus_span (start_ts, end_ts, app_id) VALUES (?, NULL, ?)", [ts, appId]) }
     }
 
     func insertSystem(sampleId: Int64, tick: Tick, reading r: SystemReading, delta d: SystemDelta, slow: SlowReading?,
-                      procs: ProcTotals?) throws {
+                      procs: ProcTotals?, session: SessionReading? = nil, focusAppId: Int64? = nil) throws {
         let cols: [(String, Any?)] = [
+            ("user_idle_s", session.map { Int($0.idleSeconds) }), ("display_on", session?.displayOn),
+            ("screen_locked", session?.locked), ("focus_app_id", focusAppId),
             ("proc_count", procs?.procCount), ("thread_count", procs?.threadCount),
             ("runnable_wait_ms", procs?.waitMs), ("unattributed_cpu_ms", procs?.unattributedCpuMs),
             ("unattributed_disk_bytes", procs?.unattributedDiskBytes),
@@ -91,8 +99,9 @@ struct Writer {
             ("d_disk_read", d.diskRead), ("d_disk_write", d.diskWrite), ("d_disk_ops", d.diskOps),
             ("disk_io_time_ms", d.diskIoTimeMs),
             ("d_net_in", d.netIn), ("d_net_out", d.netOut),
-            ("thermal_level", slow?.thermalLevel), ("on_battery", slow?.onBattery),
-            ("low_power", slow?.lowPower), ("battery_pct", slow?.batteryPct),
+            // The session reading is fresher (every tick) than the slow tier (once a minute).
+            ("thermal_level", session?.thermalLevel ?? slow?.thermalLevel), ("on_battery", session?.onBattery ?? slow?.onBattery),
+            ("low_power", session?.lowPower ?? slow?.lowPower), ("battery_pct", slow?.batteryPct),
         ]
         let sql = "INSERT INTO sys_sample (\(cols.map { $0.0 }.joined(separator: ", "))) VALUES (\(cols.map { _ in "?" }.joined(separator: ", ")))"
         try db.run(sql, cols.map { $0.1 })

@@ -22,6 +22,10 @@ public enum Migrations {
             ALTER TABLE sys_sample ADD COLUMN unknown_cpu_ms INTEGER;
             ALTER TABLE sys_sample ADD COLUMN unattributed_disk_bytes INTEGER;
             """),
+        // 4: session context.
+        (4, """
+            ALTER TABLE sys_sample ADD COLUMN screen_locked INTEGER;
+            """),
     ]
 
     public static var latestVersion: Int { steps.last!.version }

@@ -8,7 +8,7 @@ struct Pmon: ParsableCommand {
         commandName: "pmon",
         abstract: "Local macOS activity monitor: find what makes the machine sluggish.",
         version: PmonVersion.string,
-        subcommands: [Status.self, Install.self, Uninstall.self, Replay.self])
+        subcommands: [Status.self, AppCommand.self, Install.self, Uninstall.self, Replay.self])
 }
 
 /// Run a command and capture its combined output.

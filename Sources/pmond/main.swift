@@ -54,7 +54,11 @@ do {
     let topStream = config.topStreamEnabled
         ? TopStream(intervalSeconds: Int(config.foreignIntervalSeconds), pidFile: dbPath + ".top.pid") : nil
     topStream?.start()
-    let collectors = LiveCollectors(topStream: topStream)
+    let diagReports = DiagReportWatcher()
+    diagReports.start()
+    let collectors = LiveCollectors(topStream: topStream, session: SessionCollector(), diagReports: diagReports)
+    let cadencePolicy = CadencePolicy(config: config)
+    var cadence = cadencePolicy.decide(session: nil)
 
     var failures = 0
     var appliedBackoff = 0
@@ -68,13 +72,20 @@ do {
             try recorder?.append(rec)
             try pipeline.ingest(rec)
             failures = 0
-            // Self-limiting: stretch the process sweep interval while the daemon is over budget.
-            if pipeline.backoffLevel != appliedBackoff {
+            // Cadence: sample less when nobody is watching (display off, user idle, low power), and
+            // stretch the process sweep further while the daemon itself is over budget.
+            let wanted = cadencePolicy.decide(session: rec.session ?? nil)
+            if (rec.session != nil && wanted != cadence) || pipeline.backoffLevel != appliedBackoff {
+                if rec.session != nil, wanted != cadence {
+                    cadence = wanted
+                    collectors.addNote(CollectorNote(kind: "cadence", value: Int64(cadence.level), detail: #"{"mode":"\#(cadence.name)"}"#))
+                    if cadence.pauseTop { topStream?.pause() } else { topStream?.resume() }
+                }
                 appliedBackoff = pipeline.backoffLevel
-                schedulerRef?.setIntervals(systemSeconds: config.systemIntervalSeconds,
-                                           processSeconds: config.processIntervalSeconds * pipeline.backoffMultiplier,
-                                           slowSeconds: config.slowIntervalSeconds)
-                Log.info("self-limiter level \(appliedBackoff): process interval \(config.processIntervalSeconds * pipeline.backoffMultiplier) s")
+                schedulerRef?.setIntervals(systemSeconds: cadence.systemSeconds,
+                                           processSeconds: cadence.processSeconds * pipeline.backoffMultiplier,
+                                           slowSeconds: cadence.slowSeconds)
+                Log.info("cadence \(cadence.name), self-limiter level \(appliedBackoff): system \(cadence.systemSeconds) s, process \(cadence.processSeconds * pipeline.backoffMultiplier) s")
             }
         } catch {
             failures += 1
@@ -93,6 +104,7 @@ do {
         src.setEventHandler {
             scheduler.stop()
             topStream?.stop()
+            diagReports.stop()
             recorder?.close()
             Log.info("stopped after \(pipeline.ticksIngested) ticks, \(pipeline.samplesWritten) samples")
             exit(0)
@@ -104,7 +116,9 @@ do {
     Log.info("pmond \(PmonVersion.string) started: db=\(dbPath) system=\(config.systemIntervalSeconds)s process=\(config.processIntervalSeconds)s slow=\(config.slowIntervalSeconds)s"
              + (recordPath.map { " recording=\($0)" } ?? ""))
     scheduler.start()
-    dispatchMain()
+    // A run loop (not just dispatchMain) so that app-activation notifications are delivered.
+    RunLoop.main.run()
+    exit(0)
 } catch {
     Log.error("fatal: \(error)")
     exit(1)

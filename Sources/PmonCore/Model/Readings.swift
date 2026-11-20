@@ -121,6 +121,7 @@ public struct TickRecord: Codable, Equatable, Sendable {
     public var ps: PsSample?
     /// Collector state changes to record as events.
     public var notes: [CollectorNote]?
+    public var session: SessionReading?
     public init(tick: Tick, system: SystemReading? = nil, slow: SlowReading? = nil, procs: ProcSweep? = nil, selfPid: Int32? = nil) {
         self.tick = tick; self.system = system; self.slow = slow; self.procs = procs; self.selfPid = selfPid
     }

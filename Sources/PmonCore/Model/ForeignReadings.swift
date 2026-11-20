@@ -42,5 +42,10 @@ public struct CollectorNote: Codable, Equatable, Sendable {
     public var kind: String
     public var value: Int64?
     public var detail: String?
-    public init(kind: String, value: Int64? = nil, detail: String? = nil) { self.kind = kind; self.value = value; self.detail = detail }
+    /// Executable path or process name the note is about, used to attach it to an app.
+    public var exePath: String?
+    public var procName: String?
+    public init(kind: String, value: Int64? = nil, detail: String? = nil, exePath: String? = nil, procName: String? = nil) {
+        self.kind = kind; self.value = value; self.detail = detail; self.exePath = exePath; self.procName = procName
+    }
 }

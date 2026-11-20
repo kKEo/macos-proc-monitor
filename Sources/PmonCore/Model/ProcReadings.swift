@@ -53,6 +53,10 @@ public struct ProcIdentity: Codable, Equatable, Sendable {
     public var coalitionId: UInt64?
     /// Whether the daemon can read this process's counters natively.
     public var own = false
+    /// Outermost `.app` bundle containing the executable, with its identifier and display name.
+    public var bundlePath: String?
+    public var bundleId: String?
+    public var bundleName: String?
     public init() {}
 }
 
