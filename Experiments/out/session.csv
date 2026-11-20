@@ -1,0 +1,17 @@
+epoch_ms,kind,value
+1795189879150,start,pid=27896 ppid=1
+1795189881310,poll,idle_s=154.6 front=com.apple.universalcontrol locked=false thermal=0 lowpower=false
+1795189883276,poll,idle_s=156.6 front=com.apple.universalcontrol locked=false thermal=0 lowpower=false
+1795189885240,activated,com.apple.finder
+1795189885265,poll,idle_s=158.6 front=com.apple.finder locked=false thermal=0 lowpower=false
+1795189887272,poll,idle_s=160.6 front=com.apple.finder locked=false thermal=0 lowpower=false
+1795189889266,poll,idle_s=162.6 front=com.apple.finder locked=false thermal=0 lowpower=false
+1795189891265,poll,idle_s=164.6 front=com.apple.finder locked=false thermal=0 lowpower=false
+1795189891313,activated,com.apple.universalcontrol
+1795189893266,poll,idle_s=166.6 front=com.apple.universalcontrol locked=false thermal=0 lowpower=false
+1795189895250,poll,idle_s=168.6 front=com.apple.universalcontrol locked=false thermal=0 lowpower=false
+1795189897259,poll,idle_s=170.6 front=com.apple.universalcontrol locked=false thermal=0 lowpower=false
+1795189899273,poll,idle_s=172.6 front=com.apple.universalcontrol locked=false thermal=0 lowpower=false
+1795189901266,poll,idle_s=174.6 front=com.apple.universalcontrol locked=false thermal=0 lowpower=false
+1795189903265,poll,idle_s=176.6 front=com.apple.universalcontrol locked=false thermal=0 lowpower=false
+1795189903266,end,

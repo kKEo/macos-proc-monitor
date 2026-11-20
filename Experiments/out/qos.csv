@@ -1,0 +1,6 @@
+qos,cpu_s,default,maintenance,background,utility,legacy,user_initiated,user_interactive,p_share
+background,10.42,0.00,0.00,10.42,0.00,0.00,0.00,0.00,0.00
+utility,11.96,0.00,0.00,0.00,11.96,0.00,0.00,0.00,0.98
+default,11.98,0.00,0.00,0.00,0.00,11.98,0.00,0.00,0.99
+userInitiated,11.98,0.00,0.00,0.00,0.00,11.98,0.00,0.00,0.98
+userInteractive,11.98,0.00,0.00,0.00,0.00,11.98,0.00,0.00,1.00
