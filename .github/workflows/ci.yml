@@ -12,7 +12,26 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  MDBOOK_VERSION: "0.5.4"
+
 jobs:
+  docs:
+    name: Build docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mdBook
+        run: |
+          curl -fsSL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C /usr/local/bin
+          mdbook --version
+
+      - name: Build the book
+        run: mdbook build
+
   test:
     name: Build and test
     # Apple Silicon runner with Xcode 16 (the package needs Swift 6 tools and macOS 14+).

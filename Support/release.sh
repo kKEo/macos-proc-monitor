@@ -38,6 +38,9 @@ done
 
 cp README.md "$STAGE/"
 cp docs/*.md "$STAGE/docs/"
+# The book's chapter list and include stub make no sense outside mdBook; ship the design document itself.
+rm -f "$STAGE/docs/SUMMARY.md" "$STAGE/docs/design.md"
+cp DESIGN.md "$STAGE/"
 cat > "$STAGE/install.sh" <<'INSTALL'
 #!/bin/bash
 # Install or upgrade pmon for the current user. No root needed.
