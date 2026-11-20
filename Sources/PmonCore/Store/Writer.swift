@@ -40,6 +40,9 @@ struct ProcTotals {
     /// Threads of the processes we can read; foreign processes are not included yet.
     var threadCount: Int
     var waitMs: Int64
+    /// The part of `waitMs` that belongs to foreground work: each process's wait scaled by the
+    /// foreground share of its CPU time. Background threads waiting do not make the Mac feel slow.
+    var fgWaitMs: Int64 = 0
     /// System busy CPU not accounted for by any process we read. Nil when the system
     /// counters did not cover the whole process interval.
     var unattributedCpuMs: Int64?
@@ -76,8 +79,10 @@ struct Writer {
     }
 
     func insertSystem(sampleId: Int64, tick: Tick, reading r: SystemReading, delta d: SystemDelta, slow: SlowReading?,
-                      procs: ProcTotals?, session: SessionReading? = nil, focusAppId: Int64? = nil) throws {
+                      procs: ProcTotals?, session: SessionReading? = nil, focusAppId: Int64? = nil, scores: Scores? = nil) throws {
         let cols: [(String, Any?)] = [
+            ("s_cpu", scores?.cpu), ("s_mem", scores?.mem), ("s_disk", scores?.disk), ("s_thermal", scores?.thermal),
+            ("s_gpu", scores?.gpu), ("s_ui", scores?.ui), ("slug_index", scores?.index),
             ("user_idle_s", session.map { Int($0.idleSeconds) }), ("display_on", session?.displayOn),
             ("screen_locked", session?.locked), ("focus_app_id", focusAppId),
             ("proc_count", procs?.procCount), ("thread_count", procs?.threadCount),

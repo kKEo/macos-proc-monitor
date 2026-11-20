@@ -40,6 +40,24 @@ public final class Pipeline {
     private var focusAppId: Int64?
     private var focusInitialised = false
 
+    // Scoring, episodes and blame.
+    private let thresholds: Thresholds
+    private var scorer: Scorer
+    private var detector: EpisodeDetector
+    private let episodes: EpisodeStore
+    private let blame: BlameCalculator
+    private var summary: EpisodeSummary?
+    private var lastWaitShare: Double?
+    private var lastWakeTs: Int64?
+    private var lastHang: (ts: Int64, appId: Int64?)?
+    private var hangApps: [Int64] = []
+    /// Episodes whose blame is recomputed once late top-stream data has arrived.
+    private var pendingBlame: [(id: Int64, start: Int64, end: Int64, means: [String: Double], hangApps: [Int64], due: Int64)] = []
+
+    /// True while an episode is open or may be forming: the driver then samples at the fast
+    /// cadence and asks `ps` for other users' processes on every sweep.
+    public var wantsFastCadence: Bool { detector.wantsFastCadence }
+
     /// Counts for health reporting.
     public private(set) var ticksIngested = 0
     public private(set) var samplesWritten = 0
@@ -47,9 +65,14 @@ public final class Pipeline {
     public var backoffLevel: Int { limiter.level }
     public var backoffMultiplier: Double { limiter.intervalMultiplier }
 
-    public init(db: Database, host: HostInfo) throws {
+    public init(db: Database, host: HostInfo, thresholds: Thresholds = Thresholds()) throws {
         self.db = db
         self.host = host
+        self.thresholds = thresholds
+        scorer = Scorer(thresholds: thresholds)
+        detector = EpisodeDetector(thresholds: thresholds)
+        episodes = EpisodeStore(db: db)
+        blame = BlameCalculator(db: db, thresholds: thresholds)
         try Migrations.migrate(db)
         let bootId: Int64 = try db.transaction {
             try Dimensions.upsertHost(db, host)
@@ -58,6 +81,7 @@ public final class Pipeline {
         writer = Writer(db: db, bootId: bootId, pageSize: Int64(host.pageSize))
         procStore = try ProcStore(db: db, bootId: bootId)
         appStore = AppStore(db: db)
+        try db.transaction { try episodes.closeDangling() }
     }
 
     public func ingest(_ rec: TickRecord) throws {
@@ -89,6 +113,7 @@ public final class Pipeline {
             let target = try (note.exePath != nil || note.procName != nil) ? procStore.lookup(exePath: note.exePath, name: note.procName) : nil
             try writer.insertEvent(ts: tick.wallMs, kind: note.kind, value: note.value, detail: note.detail,
                                    appId: target?.appId, procId: target?.procId)
+            if note.kind == "hang" { lastHang = (tick.wallMs, target?.appId) }
         }
         try updateContext(rec, ts: tick.wallMs)
 
@@ -96,6 +121,10 @@ public final class Pipeline {
         // tick starts fresh, and leave a flagged marker row so the gap is explained.
         if tick.afterWake {
             try writer.insertEvent(ts: tick.wallMs, kind: "wake", value: Int64(tick.sleptNs / 1_000_000_000), detail: nil)
+            // Sleep ends an episode: whatever was slow before is not what is slow after.
+            if let end = detector.forceClose() { try closeEpisode(endTs: end, now: tick.wallMs) }
+            scorer.reset(); lastWaitShare = nil
+            lastWakeTs = tick.wallMs
             resetBaselines()
             if let sys = rec.system {
                 _ = systemDeltas.delta(sys, coreIsPerformance: host.coreIsPerformance)
@@ -140,9 +169,12 @@ public final class Pipeline {
                     residualDisk = (max(0, diskReadSinceSweep - deltas.reduce(0) { $0 + $1.dDiskRead }),
                                     max(0, diskWriteSinceSweep - deltas.reduce(0) { $0 + $1.dDiskWrite }))
                 }
+                // Foreground wait: each process's wait, scaled by the foreground share of its CPU time.
+                let fgWait = deltas.reduce(0.0) { $0 + Double($1.waitMs) * ($1.cpuMs > 0 ? min(1, Double($1.cpuFgMs) / Double($1.cpuMs)) : 1) }
+                lastWaitShare = fgWait / (Double(max(procDtMs!, 1)) * Double(max(host.coreIsPerformance.count, 1)))
                 totals = ProcTotals(procCount: sweep.procs.count + sweep.foreign.count,
                                     threadCount: sweep.procs.reduce(0) { $0 + Int($1.threads) },
-                                    waitMs: deltas.reduce(0) { $0 + $1.waitMs },
+                                    waitMs: deltas.reduce(0) { $0 + $1.waitMs }, fgWaitMs: Int64(fgWait.rounded()),
                                     unattributedCpuMs: busyCoversSweep ? max(0, busyMsSinceSweep - cpuMs) : nil,
                                     unattributedDiskBytes: residualDisk.map { $0.read + $0.write })
                 try observeSelfCost(sweep: sweep, deltas: deltas, selfPid: rec.selfPid, procDtMs: procDtMs!, ts: tick.wallMs)
@@ -206,10 +238,16 @@ public final class Pipeline {
         guard let sys = rec.system, let d = sysDelta else {
             return   // first reading, or a counter reset: baselines only
         }
+        // Score this sample and advance the episode state machine.
+        let session = rec.session ?? lastSession
+        let scores = scorer.score(scoreInput(tick: tick, reading: sys, delta: d, session: session))
+        let transition = detector.observe(ts: tick.wallMs, index: scores.index)
+        if detector.isOpen { flags.insert(.episodeOpen) }
+
         let id = try writer.insertSample(tick: tick, tier: rec.procs != nil ? 2 : 1, flags: flags,
                                          procDtMs: procDtMs, foreignDtMs: foreignDtMs)
         try writer.insertSystem(sampleId: id, tick: tick, reading: sys, delta: d, slow: lastSlow, procs: totals,
-                                session: rec.session ?? lastSession, focusAppId: focusAppId)
+                                session: session, focusAppId: focusAppId, scores: scores)
 
         if let procDtMs {
             for (delta, reason) in selection.select(own: deltas, selfPid: rec.selfPid, dtMs: procDtMs) {
@@ -226,6 +264,62 @@ public final class Pipeline {
         }
         if let slow = rec.slow { try writer.insertVolumes(sampleId: id, slow.volumes) }
         samplesWritten += 1
+
+        // Episodes. Done last, so blame sees this tick's app rows.
+        if case .opened(let start)? = transition {
+            var s = EpisodeSummary()
+            s.id = try episodes.open(startTs: start); s.startTs = start
+            summary = s
+            hangApps = []
+        }
+        if summary != nil, transition.map({ if case .closed = $0 { return false } else { return true } }) ?? true {
+            let present = session.map { $0.idleSeconds < thresholds.presentIdleSeconds && $0.displayOn && !$0.locked } ?? true
+            summary!.add(dtMs: Int64(tick.dtNs / 1_000_000), scores: scores, present: present, focus: focusAppId,
+                         session: session, active: scores.index >= thresholds.closeAt)
+            if let hang = lastHang, let app = hang.appId, Double(tick.wallMs - hang.ts) <= thresholds.hangSeconds * 1000 { hangApps.append(app) }
+        }
+        if case .closed(let end)? = transition { try closeEpisode(endTs: end, now: tick.wallMs) }
+
+        for p in pendingBlame where tick.wallMs >= p.due {
+            let rows = try blame.compute(episodeId: p.id, start: p.start, end: p.end, meanScores: p.means, hangApps: p.hangApps)
+            try episodes.replaceBlame(episodeId: p.id, rows, calculator: blame, start: p.start, end: p.end)
+        }
+        pendingBlame.removeAll { tick.wallMs >= $0.due }
+    }
+
+    /// Write the episode's summary and its blame. Blame is computed now and once more a minute
+    /// later, when data from the top stream that covers the episode's last seconds has arrived.
+    private func closeEpisode(endTs: Int64, now: Int64) throws {
+        guard let s = summary else { return }
+        summary = nil
+        let afterWake = lastWakeTs.map { s.startTs - $0 >= 0 && s.startTs - $0 <= 60_000 } ?? false
+        try episodes.close(s, endTs: max(endTs, s.startTs), afterWake: afterWake)
+        let means = Dictionary(uniqueKeysWithValues: Scores.dimensions.map { ($0, s.mean($0)) })
+        let rows = try blame.compute(episodeId: s.id, start: s.startTs, end: endTs, meanScores: means, hangApps: hangApps)
+        try episodes.replaceBlame(episodeId: s.id, rows, calculator: blame, start: s.startTs, end: endTs)
+        pendingBlame.append((s.id, s.startTs, endTs, means, hangApps, now + 60_000))
+    }
+
+    private func scoreInput(tick: Tick, reading sys: SystemReading, delta d: SystemDelta, session: SessionReading?) -> ScoreInput {
+        let dtMs = Double(max(tick.dtNs / 1_000_000, 1))
+        let pCores = Double(max(host.coreIsPerformance.filter { $0 }.count, 1))
+        var x = ScoreInput()
+        x.pBusyShare = Double(d.pBusyMs) / (dtMs * pCores)
+        x.waitShare = lastWaitShare
+        x.canaryMs = Double(tick.lateNs) / 1e6
+        x.pressureLevel = sys.pressureLevel
+        x.memLevelPct = sys.memLevelPct
+        x.thrash = Double(d.decompressions + d.pageins + 4 * (d.swapins + d.swapouts)) / (dtMs / 1000)
+        x.queueDepth = Double(d.diskIoTimeMs) / dtMs
+        if let v = lastSlow?.volumes.first(where: { $0.mount == "/" }) ?? lastSlow?.volumes.first, v.total > 0 {
+            x.diskFreePct = Double(v.free) / Double(v.total) * 100
+        }
+        x.thermalLevel = session?.thermalLevel ?? lastSlow?.thermalLevel ?? 0
+        if let hang = lastHang {
+            x.hangAgeSeconds = Double(tick.wallMs - hang.ts) / 1000
+            x.hangIsFocus = hang.appId != nil && hang.appId == focusAppId
+        }
+        return x
     }
 
     private static func foreignMap(_ sweep: ProcSweep) -> [Int32: UInt64] {

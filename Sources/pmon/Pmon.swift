@@ -8,7 +8,7 @@ struct Pmon: ParsableCommand {
         commandName: "pmon",
         abstract: "Local macOS activity monitor: find what makes the machine sluggish.",
         version: PmonVersion.string,
-        subcommands: [Status.self, AppCommand.self, Install.self, Uninstall.self, Replay.self])
+        subcommands: [Status.self, Why.self, Episodes.self, AppCommand.self, Mark.self, Install.self, Uninstall.self, Replay.self, Calibrate.self])
 }
 
 /// Run a command and capture its combined output.
@@ -41,9 +41,13 @@ struct Replay: ParsableCommand {
     @Option(help: "Database to write. Must not be the live database.")
     var db: String
 
+    @Option(help: "JSON file with threshold overrides (any subset of fields).")
+    var thresholds: String?
+
     func run() throws {
         guard db != PmonPaths.database else { throw ValidationError("refusing to replay into the live database") }
-        let n = try Replayer.replay(recording: recording, into: Database(path: db))
+        let t = try thresholds.map { try JSONDecoder().decode(Thresholds.self, from: Data(contentsOf: URL(fileURLWithPath: $0))) } ?? Thresholds()
+        let n = try Replayer.replay(recording: recording, into: Database(path: db), thresholds: t)
         print("replayed \(n) ticks into \(db)")
     }
 }

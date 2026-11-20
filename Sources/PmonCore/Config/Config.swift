@@ -37,6 +37,10 @@ public struct Config: Codable, Equatable, Sendable {
     public var foreignIntervalSeconds: Double = 30
     /// Set false to cover other users' processes with `ps` only.
     public var topStreamEnabled = true
+    /// Sample less often when the user is away, the display is off, or in Low Power Mode on battery.
+    public var relaxWhenIdle = true
+    /// Tunable numbers of the sluggishness model; any subset may be given.
+    public var thresholds = Thresholds()
 
     public init() {}
 
@@ -49,6 +53,8 @@ public struct Config: Codable, Equatable, Sendable {
         recordingCapMB = try c.decodeIfPresent(Int.self, forKey: .recordingCapMB) ?? d.recordingCapMB
         foreignIntervalSeconds = try c.decodeIfPresent(Double.self, forKey: .foreignIntervalSeconds) ?? d.foreignIntervalSeconds
         topStreamEnabled = try c.decodeIfPresent(Bool.self, forKey: .topStreamEnabled) ?? d.topStreamEnabled
+        relaxWhenIdle = try c.decodeIfPresent(Bool.self, forKey: .relaxWhenIdle) ?? d.relaxWhenIdle
+        thresholds = try c.decodeIfPresent(Thresholds.self, forKey: .thresholds) ?? d.thresholds
     }
 
     /// Load from `path`; a missing file yields the defaults, a malformed one is an error.

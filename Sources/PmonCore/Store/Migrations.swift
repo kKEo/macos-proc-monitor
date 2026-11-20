@@ -26,6 +26,10 @@ public enum Migrations {
         (4, """
             ALTER TABLE sys_sample ADD COLUMN screen_locked INTEGER;
             """),
+        // 5: the numbers behind each blame share, so explanations outlive the raw samples.
+        (5, """
+            ALTER TABLE episode_blame ADD COLUMN detail TEXT;
+            """),
     ]
 
     public static var latestVersion: Int { steps.last!.version }

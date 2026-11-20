@@ -6,7 +6,7 @@ public struct Cadence: Equatable, Sendable {
     public var systemSeconds: Double, processSeconds: Double, slowSeconds: Double
     /// Suspend the top child: nobody is looking, and it is the largest single cost.
     public var pauseTop: Bool
-    /// 0 normal, 1 relaxed, 2 asleep; stored as the value of the `cadence` event.
+    /// 0 normal, 1 relaxed, 2 asleep, 3 fast; stored as the value of the `cadence` event.
     public var level: Int
 }
 
@@ -21,10 +21,15 @@ public struct CadencePolicy: Sendable {
 
     public init(config: Config) { self.config = config }
 
-    public func decide(session: SessionReading?) -> Cadence {
+    /// `fast`: an episode is open or forming, so sample closely regardless of everything else.
+    public func decide(session: SessionReading?, fast: Bool = false) -> Cadence {
+        if fast {
+            return Cadence(name: "fast", systemSeconds: min(2, config.systemIntervalSeconds), processSeconds: min(2, config.processIntervalSeconds),
+                           slowSeconds: config.slowIntervalSeconds, pauseTop: false, level: 3)
+        }
         let normal = Cadence(name: "normal", systemSeconds: config.systemIntervalSeconds, processSeconds: config.processIntervalSeconds,
                              slowSeconds: config.slowIntervalSeconds, pauseTop: false, level: 0)
-        guard let s = session else { return normal }
+        guard config.relaxWhenIdle, let s = session else { return normal }
         if !s.displayOn || s.locked {
             return Cadence(name: "asleep", systemSeconds: max(60, normal.systemSeconds), processSeconds: max(60, normal.processSeconds),
                            slowSeconds: max(300, normal.slowSeconds), pauseTop: true, level: 2)

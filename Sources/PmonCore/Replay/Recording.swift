@@ -44,20 +44,36 @@ public final class Recorder {
 public enum Replayer {
     /// Returns the number of tick records replayed.
     @discardableResult
-    public static func replay(recording path: String, into db: Database) throws -> Int {
-        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
+    public static func replay(recording path: String, into db: Database, thresholds: Thresholds = Thresholds()) throws -> Int {
+        guard let text = try? readText(path) else {
             throw CocoaError(.fileReadNoSuchFile, userInfo: [NSFilePathErrorKey: path])
         }
         let decoder = JSONDecoder()
         var lines = text.split(separator: "\n", omittingEmptySubsequences: true).makeIterator()
         guard let first = lines.next() else { return 0 }
         let header = try decoder.decode(RecordingHeader.self, from: Data(first.utf8))
-        let pipeline = try Pipeline(db: db, host: header.host)
+        let pipeline = try Pipeline(db: db, host: header.host, thresholds: thresholds)
         var n = 0
         while let line = lines.next() {
             try pipeline.ingest(decoder.decode(TickRecord.self, from: Data(line.utf8)))
             n += 1
         }
         return n
+    }
+
+    /// Read a recording, transparently decompressing `.gz` files (recordings compress about tenfold).
+    static func readText(_ path: String) throws -> String {
+        guard path.hasSuffix(".gz") else { return try String(contentsOfFile: path, encoding: .utf8) }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/gunzip")
+        p.arguments = ["-c", path]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        try p.run()
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else { throw CocoaError(.fileReadCorruptFile, userInfo: [NSFilePathErrorKey: path]) }
+        return String(decoding: data, as: UTF8.self)
     }
 }

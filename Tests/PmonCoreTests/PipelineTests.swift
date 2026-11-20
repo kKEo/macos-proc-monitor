@@ -37,7 +37,7 @@ final class PipelineTests: XCTestCase {
 
         try db.query("""
             SELECT s.dt_ms, s.tier, s.flags, y.p_busy_ms, y.e_busy_ms, y.cpu_idle_ms, y.d_swapouts, y.disk_io_time_ms,
-                   y.mem_free, y.mem_compressed, y.compressor_size, y.on_battery, y.battery_pct, y.thermal_level, y.slug_index
+                   y.mem_free, y.mem_compressed, y.compressor_size, y.on_battery, y.battery_pct, y.thermal_level, y.s_gpu, y.slug_index
             FROM sample s JOIN sys_sample y USING (sample_id) ORDER BY s.sample_id LIMIT 1
             """) { r in
             XCTAssertEqual(r.int(0), 5000); XCTAssertEqual(r.int(2), 0)
@@ -46,7 +46,8 @@ final class PipelineTests: XCTestCase {
             XCTAssertEqual(r.int(6), 7); XCTAssertEqual(r.int(7), 250)
             XCTAssertEqual(r.int(8), 10_000 * 16384); XCTAssertEqual(r.int(9), 60_000 * 16384); XCTAssertEqual(r.int(10), 20_000 * 16384)
             XCTAssertEqual(r.int(11), 1); XCTAssertEqual(r.int(12), 80); XCTAssertEqual(r.int(13), 1)
-            XCTAssertTrue(r.isNull(14), "scores are not computed yet and must be NULL, not 0")
+            XCTAssertTrue(r.isNull(14), "no GPU collector yet: its score must be NULL, not 0")
+            XCTAssertEqual(r.int(15), 20, "thermal level 'fair' is the only thing above zero on this quiet machine")
         }
         // No process sweeps in these records, so every sample is system-only.
         XCTAssertEqual(try db.scalarInt("SELECT COUNT(*) FROM sample WHERE tier = 2"), 0)

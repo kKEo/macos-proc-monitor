@@ -58,6 +58,8 @@ struct Memory: ParsableCommand {
     @Option(help: "Seconds to hold it.") var seconds: Double = 20
     @Option(help: "Megabytes allocated per second (0 = all at once).") var rate = 0
     @Flag(help: "Fill with zeros instead of random bytes (compressible).") var compressible = false
+    @Option(help: "While holding, re-read all of it every this many seconds (0 = never). Forces compressed or swapped memory back in.")
+    var touchEvery: Double = 0
 
     func run() {
         let chunkMB = rate > 0 ? min(rate, mb) : mb
@@ -65,19 +67,29 @@ struct Memory: ParsableCommand {
         var allocated = 0
         print("pid \(getpid()): allocating \(mb) MB (\(compressible ? "compressible" : "incompressible")), holding \(seconds) s")
         while allocated < mb {
-            let size = min(chunkMB, mb - allocated) << 20
+            let size = chunkMB << 20                        // uniform chunks keep the re-touch loop simple
             let p = UnsafeMutableRawPointer.allocate(byteCount: size, alignment: 16384)
             if compressible { memset(p, 0, size) } else { arc4random_buf(p, size) }
             chunks.append(p); allocated += size >> 20
             if rate > 0, allocated < mb { Thread.sleep(forTimeInterval: 1) }
         }
-        Thread.sleep(forTimeInterval: seconds)
+        let end = nowNs() + UInt64(seconds * 1e9)
+        var sum: UInt64 = 0
+        while nowNs() < end {
+            guard touchEvery > 0 else { Thread.sleep(forTimeInterval: Double(end - nowNs()) / 1e9); break }
+            Thread.sleep(forTimeInterval: min(touchEvery, Double(end - min(end, nowNs())) / 1e9))
+            for c in chunks {                              // one byte per page is enough to fault it in
+                var off = 0
+                while off < chunkMB << 20 { sum &+= UInt64(c.load(fromByteOffset: off, as: UInt8.self)); off += 16384 }
+            }
+        }
+        if sum == 1 { print("") }
         for c in chunks { c.deallocate() }
     }
 }
 
 struct Disk: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Write and read back an uncached scratch file, repeatedly.")
+    static let configuration = CommandConfiguration(abstract: "Write an uncached scratch file once, then read it back repeatedly (reads cause no SSD wear).")
     @Option(help: "Megabytes per pass.") var mb = 512
     @Option(help: "Run for at least this many seconds.") var seconds: Double = 20
     @Option(help: "Scratch file path.") var path = NSTemporaryDirectory() + "pmon-stress-\(getpid()).bin"
@@ -89,19 +101,19 @@ struct Disk: ParsableCommand {
         arc4random_buf(buf, chunk)
         let end = nowNs() + UInt64(seconds * 1e9)
         var passes = 0
-        print("pid \(getpid()): writing and reading \(mb) MB at \(path) for \(seconds) s")
+        print("pid \(getpid()): writing \(mb) MB at \(path), then reading it for \(seconds) s")
+        let fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0o600)
+        guard fd >= 0 else { throw ValidationError("cannot open \(path)") }
+        defer { close(fd) }
+        _ = fcntl(fd, F_NOCACHE, 1)
+        for _ in 0..<(mb / 4) { _ = write(fd, buf, chunk) }
+        fsync(fd)
         repeat {
-            let fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0o600)
-            guard fd >= 0 else { throw ValidationError("cannot open \(path)") }
-            _ = fcntl(fd, F_NOCACHE, 1)
-            for _ in 0..<(mb / 4) { _ = write(fd, buf, chunk) }
-            fsync(fd)
             lseek(fd, 0, SEEK_SET)
-            while read(fd, buf, chunk) > 0 {}
-            close(fd)
+            while read(fd, buf, chunk) > 0, nowNs() < end {}
             passes += 1
         } while nowNs() < end
-        print("\(passes) passes, \(passes * mb) MB written and read")
+        print("\(mb) MB written once, read \(passes) times")
     }
 }
 

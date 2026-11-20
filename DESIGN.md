@@ -331,6 +331,32 @@ For each closed episode, for each app, for each dimension, compute a share from 
 
 **Culprit vs. victim.** During memory episodes the process with the most page-ins is often the one being hurt, not the one causing harm. An app is marked `victim` when its page-in share is high but its footprint and growth shares are low, and `culprit` otherwise. The frontmost app in a memory episode is frequently a victim; reports say so explicitly.
 
+### 8.5 As built (phase 5)
+
+**Scores.** All numbers live in `Thresholds` and can be overridden under `thresholds` in the configuration file.
+
+| Dimension | Signal | 0 at | 100 at | Notes |
+|---|---|---|---|---|
+| cpu | Foreground wait share: time foreground threads were ready without a core ÷ all core time | 0.05 | 0.75 | Each process's wait is scaled by the foreground share of its CPU, so background threads queueing on efficiency cores do not count |
+| cpu | Performance cores busy | 85 % | 100 % → **50** | Busy cores with nothing waiting are capped below the episode threshold |
+| cpu | Timer lateness | 10 ms | 150 ms | Idle baseline about 0.2 ms; one-off spikes to 60 ms were seen |
+| memory | Kernel pressure level | — | warn 25, critical 75 | The level is sticky, so on its own it stays below an episode |
+| memory | Paging: decompressions + page-ins + 4 × (swap-ins + swap-outs), per second, **median of three samples** | 4 000 | 30 000 | Idle baseline: median 90, 95th percentile 3 000, single spikes to 13 000 |
+| memory | `memorystatus_level` | 30 % | 8 % → **60** | |
+| disk | Queue depth, **median of three samples** | 0.5 | 3.0 | Idle baseline: 95th percentile 0.26, single spikes to 7.6 |
+| disk | Free space | 10 % | 2 % → **30** | A full volume is a standing condition, not an episode; it becomes a finding in phase 6 |
+| thermal | Thermal level | nominal | fair 20, serious 70, critical 100 | |
+| ui | Hang or spin report | — | 100 for the focused app, 50 for another, for 30 s | |
+| gpu | — | — | — | Stored as NULL until a GPU collector exists |
+
+**Episodes.** One rule replaces "close after 30 s, merge within 60 s": an episode closes once the index has stayed below 40 for 45 s, and then *ends at the last sample that was still at or above 40*. A flapping signal therefore yields a single episode. An episode opens when 3 of the last 5 samples reach 60 and starts at the first of those. Sleep ends an open episode. An episode left open by a stopped daemon is closed at the last recorded sample when the daemon starts again (it does not continue across restarts).
+
+**Fast cadence.** While an episode is open, or the index is at or above 40, the daemon samples system and processes every 2 s and runs `ps` on every sweep, overriding the relaxed and asleep cadences.
+
+**Blame.** Computed from `app_sample` when the episode closes and once more 60 s later, when top-stream data covering its last seconds has arrived. Only dimensions that averaged at least 10 are blamed, and only shares of at least 2 % are stored. Victims are identified in two dimensions: memory (many page-ins while holding and growing little) and CPU (a large share of the waiting with a small share of the CPU); they are stored with role `victim` and a score of 0. `episode_blame.detail` holds the numbers behind each share (held and grown memory, CPU percentage, megabytes of I/O) so explanations do not depend on raw samples that expire. Thermal blame uses energy, which is only known for natively read processes.
+
+**Commands.** `pmon why [--at TIME]`, `pmon episodes [--since 24h] [--all]`, `pmon mark [note]` (writes a `mark` event), and `pmon calibrate <recording> [--thresholds file] [--samples]`, which replays a recording with candidate thresholds and prints the episodes, their blame and how many marks fall inside them.
+
 ### 8.4 Findings outside episodes
 
 Chronic problems that never trip an episode but are worth reporting. A once-a-minute pass over rollups writes rows to `finding`:
@@ -519,6 +545,7 @@ CREATE TABLE episode_blame (
   role TEXT NOT NULL CHECK (role IN ('culprit','victim')),
   confidence INTEGER NOT NULL,      -- 0 low (proxy or reduced fidelity) .. 2 high
   top_proc_id INTEGER, peak_value INTEGER,
+  detail TEXT,                      -- JSON: the numbers behind the share
   PRIMARY KEY (episode_id, app_id, dim)
 ) WITHOUT ROWID;
 CREATE INDEX blame_app ON episode_blame(app_id);

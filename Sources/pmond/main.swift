@@ -48,7 +48,7 @@ do {
     let config = try Config.load(path: configPath)
     let host = HostInfo.current()
     let db = try Database(path: dbPath)
-    let pipeline = try Pipeline(db: db, host: host)
+    let pipeline = try Pipeline(db: db, host: host, thresholds: config.thresholds)
     let recorder = try recordPath.map { try Recorder(path: $0, host: host, capMB: config.recordingCapMB) }
     // The top stream covers processes of other users; without it, ps does (at higher cost).
     let topStream = config.topStreamEnabled
@@ -74,7 +74,8 @@ do {
             failures = 0
             // Cadence: sample less when nobody is watching (display off, user idle, low power), and
             // stretch the process sweep further while the daemon itself is over budget.
-            let wanted = cadencePolicy.decide(session: rec.session ?? nil)
+            let wanted = cadencePolicy.decide(session: rec.session ?? nil, fast: pipeline.wantsFastCadence)
+            collectors.psBurst = pipeline.wantsFastCadence
             if (rec.session != nil && wanted != cadence) || pipeline.backoffLevel != appliedBackoff {
                 if rec.session != nil, wanted != cadence {
                     cadence = wanted
