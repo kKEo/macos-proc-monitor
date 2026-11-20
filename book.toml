@@ -1,0 +1,14 @@
+[book]
+title = "pmon"
+description = "A local macOS monitor that finds which application made the Mac sluggish, when, and why."
+language = "en"
+src = "docs"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+site-url = "/macos-proc-monitor/"
+git-repository-url = "https://github.com/kKEo/macos-proc-monitor"
+edit-url-template = "https://github.com/kKEo/macos-proc-monitor/edit/master/docs/{path}"
