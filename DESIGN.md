@@ -52,7 +52,10 @@ Measured on 2026-11-20 with the probes in `Experiments/` (raw data in `Experimen
 | 12 | Diagnostic reports are watchable and readable | **Confirmed** | FSEvents delivered create and delete events for the user directory; report headers in both directories were readable without root | Diagnostic-report ingestion as designed |
 | 13 | Timer canary | **Adjusted** | An ordinary sleep-based timer was a constant 5.0 ms late (p95 5.1 ms) on an idle machine | Use a strict zero-leeway timer and score lateness relative to the idle baseline |
 | 14 | GPU utilisation is readable | **Confirmed for the device, open per process** | `Device Utilization %` is present; the per-client `AppUsage` lists were empty when sampled | Device-level GPU in the default slow tier; per-process GPU stays an optional, unproven collector |
-| 15 | Counters and timers across sleep | **Not verified** | The machine did not sleep during the session (sleep was being prevented) | Check in subphase 1.2 by closing the lid during a recording |
+| 16 | A long-lived `top` stream is stable and cheap | **Confirmed** | 100 samples over 49.6 minutes at 30 s: 63 175 rows, 0 malformed rows, 0 header changes, sample spacing 30–31 s. Cost 0.065 s CPU per sample = **0.22 % of a core**; memory at most 5.3 MB | Keep the top stream. An overnight run (`Experiments/soak_top.sh 960 30`) is an optional extra check |
+| 15 | Counters and timers across sleep | **Not verified** | The machine did not sleep during the 45-minute watch (sleep was being prevented) | Check in subphase 1.2 by closing the lid during a recording |
+
+**Decision (go / no-go): go.** Phase 3 is built on the `top` stream as designed, with `ps` as the burst source and the fallback. No assumption was dropped; five were adjusted, all in the interpretation of a counter rather than in the architecture. Two items remain open and are scheduled: sleep behaviour (subphase 1.2) and swap-out behaviour under heavy memory pressure (phase 5 scenario recordings).
 
 ## 3. What "sluggish" means here
 
@@ -107,8 +110,8 @@ Three data paths feed the same delta engine. Each process is assigned one by whe
 | Path | Processes | How | Cadence | Cost |
 |---|---|---|---|---|
 | **Native** | Own (about 2/3 of all, and nearly every app the user can quit) | libproc syscalls | 10 s | about 5 ms per sweep |
-| **Top stream** | Foreign | One long-lived `top -l 0 -s 30 -stats …` child; `pmond` parses its output and keeps only foreign rows | 30 s | about 0.1 s CPU per sample, 7 MB |
-| **ps burst** | Foreign | `ps -p <foreign pids> -o pid=,utime=,stime=` | Only while an episode is open or the index is above 40: every 5 s | 60 ms per call |
+| **Top stream** | Foreign | One long-lived `top -l 0 -s 30 -stats …` child; `pmond` parses its output and keeps only foreign rows | 30 s | 0.065 s CPU per sample, 5 MB (measured over 50 min) |
+| **ps burst** | Foreign | `ps -p <foreign pids> -o pid=,utime=,stime=` | Only while an episode is open or the index is above 40: every 5 s | 28 ms per call (measured) |
 
 What each path yields:
 
@@ -132,7 +135,7 @@ So totals always reconcile, and blame can always land somewhere honest: either o
 
 **Top stream details.** The child is started lazily, paused with `SIGSTOP` while the display is asleep or the user is idle, resumed with `SIGCONT`, and restarted if it exits. Verified: the first sample after a 30 s pause covers the whole gap correctly. Columns fall into three kinds, handled differently: cumulative (`TIME`, `IDLEW`, `PAGEINS`, `CSW`, `FAULTS`) go through the delta engine like native counters; per-interval deltas (`INSTRS`, `CYCLES`) are used as they are; rates (`%CPU`, `POWER`) are ignored. The `COMMAND` column is never requested — names contain spaces and would break column parsing; identity comes from native calls by pid. `TIME` drops to whole-second resolution once a process has over an hour of CPU, so for those processes CPU comes from `ps`, which always reports hundredths. Column set is pinned with `-stats`, and the parser validates the header on every start so an OS update that changes the format degrades to the `ps` path with an event, rather than writing wrong numbers.
 
-**Budget in rootless mode:** about 0.4 % of one core on average (0.05 % native sweep, 0.3 % top stream, the rest system sampling and writes), about 30 MB including the child.
+**Budget in rootless mode:** about 0.3 % of one core on average (0.05 % native sweep, 0.22 % top stream measured, the rest system sampling and writes), about 30 MB including the child.
 
 ### 4.2 What the optional root helper changes
 
@@ -338,11 +341,13 @@ The shape is a star schema: small dimension tables, narrow fact tables at three 
 ```sql
 CREATE TABLE host (                 -- one row; static facts for report headers
   host_id INTEGER PRIMARY KEY, model TEXT, chip TEXT,
-  p_cores INTEGER, e_cores INTEGER, mem_bytes INTEGER, timebase_num INTEGER, timebase_den INTEGER
+  p_cores INTEGER, e_cores INTEGER, mem_bytes INTEGER, page_size INTEGER,
+  timebase_num INTEGER, timebase_den INTEGER
 );
 
 CREATE TABLE boot (                 -- kernel counters reset here
-  boot_id INTEGER PRIMARY KEY, boot_ts INTEGER NOT NULL, os_version TEXT, os_build TEXT
+  boot_id INTEGER PRIMARY KEY, session_uuid TEXT NOT NULL UNIQUE,   -- kern.bootsessionuuid
+  boot_ts INTEGER NOT NULL, os_version TEXT, os_build TEXT
 );
 
 CREATE TABLE app (                  -- the unit of blame
@@ -637,7 +642,8 @@ Every command takes `--json`. The HTML report is a generated static file, not a 
 | `top` child is the largest single cost (about 0.3 % of a core) | 30 s interval, paused when idle or display asleep, first to be slowed by the self-limiter |
 | A system daemon's disk I/O cannot be named without root | Reported as combined `system.foreign` with low confidence; the well-known suspects (`mds_stores`, `backupd`, `cloudd`) are listed with their CPU as a hint; the helper resolves it |
 | Foreign processes sampled at 30 s can miss short bursts | `ps` burst at 5 s whenever the index rises; system-level counters still catch the burst itself at 5 s |
-| Open: does `ri_runnable_time` capture all scheduler wait, including E-core demotion? | Phase 0 experiment with a synthetic CPU-saturating load |
+| Resolved in phase 0: `ri_runnable_time` includes on-core time | Wait is computed as runnable minus CPU time (section 2.1, row 2) |
+| Open: counter and timer behaviour across sleep; swap-out rates under heavy pressure | Lid-close test in subphase 1.2; memory scenario recording in phase 5 |
 | Open: per-core or per-cluster storage? | Per-cluster by default; revisit if single-thread saturation proves hard to see |
 
 ## 13. Implementation phases

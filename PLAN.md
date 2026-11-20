@@ -46,8 +46,8 @@ Dependency direction: `Model` ← `Collect`, `Engine`, `Attribute`, `Score` ← 
 
 | # | Phase | Subphases | Depends on | Size |
 |---|---|---|---|---|
-| 0 | Validate assumptions | 0.1 – 0.5 | — | 1–2 days |
-| 1 | Foundation | 1.1 – 1.7 | 0 | 3–5 days |
+| 0 | Validate assumptions — **done 2026-11-20, decision: go** (findings in `DESIGN.md` 2.1) | 0.1 – 0.5 | — | 1–2 days |
+| 1 | Foundation — **implemented 2026-11-20**; daemon installed, 24-hour exit check in progress | 1.1 – 1.7 | 0 | 3–5 days |
 | 2 | Own processes | 2.1 – 2.5 | 1 | 3–5 days |
 | 3 | Full coverage without root | 3.1 – 3.5 | 2 | 3–5 days |
 | 4 | Applications and context | 4.1 – 4.6 | 3 | 3–5 days |
@@ -134,8 +134,8 @@ The skeleton everything else plugs into, ending with a daemon that records machi
 
 - 1.2.1 `Clock` protocol (wall, monotonic, continuous) with `SystemClock` and `FakeClock`.
 - 1.2.2 `Scheduler`: named tiers with intervals, coalesced firing, `utility` QoS.
-- 1.2.3 Sleep detection from the gap between monotonic and continuous time; affected ticks are flagged.
-- 1.2.4 Canary: measure how late a `userInitiated` timer fires.
+- 1.2.3 Sleep detection from the gap between monotonic and continuous time; affected ticks are flagged. Includes the lid-close test carried over from phase 0.
+- 1.2.4 Canary: measure how late a strict zero-leeway `userInitiated` timer fires, relative to its idle baseline.
 
 **Files:** `Engine/Clock.swift`, `Engine/Scheduler.swift`. **Done when:** fake-clock tests show correct tick order, interval lengths and sleep flags.
 
