@@ -328,3 +328,94 @@ final class OptionalPipelineTests: XCTestCase {
         XCTAssertEqual(try db.scalarInt("SELECT COUNT(*) FROM capture"), 0)
     }
 }
+
+final class NotificationTests: XCTestCase {
+    typealias Rig = ProcessPipelineTests.Rig
+
+    func testLimiterSwitchesAndRateLimit() {
+        let slow = Notice(kind: .longEpisode, title: "t", body: "b"), found = Notice(kind: .finding, title: "t", body: "b")
+        var off = NoticeLimiter(config: NotifyConfig())
+        XCTAssertFalse(off.allow(slow, nowMs: 0), "off by default")
+
+        var c = NotifyConfig(); c.enabled = true; c.findings = false
+        var l = NoticeLimiter(config: c)
+        XCTAssertFalse(l.allow(found, nowMs: 0), "findings switched off")
+        XCTAssertTrue(l.allow(slow, nowMs: 1000))
+        XCTAssertFalse(l.allow(slow, nowMs: 29 * 60_000), "one per half hour")
+        XCTAssertTrue(l.allow(slow, nowMs: 31 * 60_000 + 1000))
+
+        let partial = try? JSONDecoder().decode(Config.self, from: Data(#"{"notifications":{"enabled":true,"minGapMinutes":5}}"#.utf8))
+        XCTAssertEqual(partial?.notifications.enabled, true); XCTAssertEqual(partial?.notifications.minGapMinutes, 5)
+        XCTAssertEqual(partial?.notifications.longEpisodeSeconds, 120)
+    }
+
+    func testNotificationScriptIsQuotedSafely() {
+        let n = Notice(kind: .finding, title: #"a "quoted" title"#, body: "back\\slash\nnew line")
+        XCTAssertEqual(Notifier.script(n), #"display notification "back\\slash new line" with title "a \"quoted\" title""#)
+    }
+
+    /// The hog saturates the CPU for 150 s. One notice, once the slowdown has lasted two minutes
+    /// with the user present; none when the user is away.
+    func notices(idleSeconds: Double) throws -> [Notice] {
+        let pipeline = try Pipeline(db: Database(path: tempDir(self) + "/a.db"), host: testHost())
+        let rig = Rig()
+        rig.fake.bundles = [10: ("/Applications/Hog.app", "com.example.hog", "Hog")]
+        let hog = rig.fake.spawn(pid: 10), other = rig.fake.spawn(pid: 20)
+        var out: [Notice] = []
+        for i in 0..<60 {
+            let hot = (8..<38).contains(i)
+            var rec = rig.tick { f in f.run(hog, cpuMs: hot ? 16_000 : 50, waitMs: hot ? 14_000 : 0); f.run(other, cpuMs: 40) }
+            var s = SessionReading(); s.frontPid = 20; s.idleSeconds = idleSeconds
+            rec.session = s
+            try pipeline.ingest(rec)
+            out += pipeline.takeNotices()
+        }
+        return out
+    }
+
+    func testOneNoticeForALongSlowdownWhilePresent() throws {
+        let present = try notices(idleSeconds: 3)
+        XCTAssertEqual(present.count, 1)
+        XCTAssertEqual(present.first?.kind, .longEpisode)
+        XCTAssertEqual(present.first?.title, "Your Mac has been slow for 2 minutes")
+        XCTAssertEqual(present.first?.body, "CPU contention. Busiest: Hog. `pmon why` explains it.")
+        XCTAssertEqual(try notices(idleSeconds: 900).count, 0, "nobody there to tell")
+    }
+}
+
+final class UpgradeTests: XCTestCase {
+    /// A database as phase 1 left it (schema version 1, with data) is upgraded in place by a
+    /// current daemon, keeps its rows, and accepts new ones.
+    func testPhaseOneDatabaseIsUpgradedInPlace() throws {
+        let path = tempDir(self) + "/old.db"
+        do {
+            let old = try Database(path: path)
+            try old.transaction {
+                try old.exec(Schema.v1)
+                try old.exec("PRAGMA user_version = 1")
+                try old.run("INSERT INTO host (host_id, model, chip, p_cores, e_cores, mem_bytes, page_size, timebase_num, timebase_den) VALUES (1, 'Old', 'Old', 2, 2, 1, 16384, 1, 1)")
+                try old.run("INSERT INTO boot (session_uuid, boot_ts, os_version, os_build) VALUES ('OLD-BOOT', 1, '25', 'x')")
+                try old.run("INSERT INTO sample (ts, boot_id, dt_ms, tier, flags) VALUES (1000, 1, 5000, 1, 0)")
+                try old.run("INSERT INTO sys_sample (sample_id, cpu_user_ms, cpu_sys_ms, cpu_idle_ms) VALUES (1, 100, 50, 19850)")
+            }
+            XCTAssertEqual(old.userVersion, 1)
+        }
+        let db = try Database(path: path)
+        let pipeline = try Pipeline(db: db, host: testHost())
+        XCTAssertEqual(db.userVersion, Migrations.latestVersion)
+        XCTAssertEqual(try db.scalarInt("SELECT cpu_user_ms FROM sys_sample WHERE sample_id = 1"), 100, "old rows survive")
+        XCTAssertEqual(try db.scalarInt("SELECT COUNT(*) FROM boot"), 2, "the old boot and the current one")
+
+        let rig = ProcessPipelineTests.Rig()
+        _ = rig.fake.spawn(pid: 10)
+        for _ in 0..<6 { try pipeline.ingest(rig.tick()) }
+        XCTAssertGreaterThan(try db.scalarInt("SELECT COUNT(*) FROM sample") ?? 0, 4)
+        // Columns added by every later migration are there and usable.
+        XCTAssertNotNil(try db.scalarInt("SELECT COUNT(proc_dt_ms) + COUNT(foreign_dt_ms) FROM sample"))
+        XCTAssertNotNil(try db.scalarInt("SELECT COUNT(screen_locked) + COUNT(disk_probe_ms) + COUNT(unknown_cpu_ms) FROM sys_sample"))
+        XCTAssertNotNil(try db.scalarInt("SELECT COUNT(detail) FROM episode_blame"))
+        XCTAssertNotNil(try db.scalarInt("SELECT COUNT(cost_ms) FROM capture"))
+        XCTAssertNotNil(try db.scalarInt("SELECT COUNT(*) FROM state"))
+        XCTAssertEqual(try Migrations.migrate(db), 0, "nothing left to apply")
+    }
+}

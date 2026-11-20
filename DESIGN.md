@@ -1,6 +1,6 @@
 # pmon — local macOS process activity monitor: design
 
-Status: phases 0–8 implemented (see PLAN.md); "as built" notes mark where the code differs from the design. Target: macOS 14+ on Apple Silicon (developed on macOS 26.2, MacBook Air, 4P+4E cores, 8 GB RAM).
+Status: phases 0–9 implemented (see PLAN.md); "as built" notes mark where the code differs from the design. Target: macOS 14+ on Apple Silicon (developed on macOS 26.2, MacBook Air, 4P+4E cores, 8 GB RAM).
 
 ## 1. Goal
 
@@ -735,6 +735,8 @@ GROUP BY a.app_id HAVING pct_in_front < 5 ORDER BY cpu_min DESC LIMIT 10;
 | `pmon export <episodes\|blame\|findings\|apps\|system\|events> --format json\|csv` | Raw access for other tools |
 
 Every command takes `--json`. The HTML report is a generated static file, not a server; nothing listens on a port. A menu-bar item showing the live index is a natural later addition and needs no schema change.
+
+**As built (phase 9).** `pmon-menu` is a separate accessory executable (no Dock icon) started by its own LaunchAgent. It opens the database read-only every five seconds, shows the index next to a gauge symbol (a warning symbol while an episode is open, a dash when the daemon has not sampled for three minutes), and runs `pmon why`, `pmon findings` and `pmon report` for the longer answers. Notifications come from the daemon: the pipeline emits a notice when an open episode has lasted two minutes with the user present (once per episode) and when a finding is new; the daemon applies the switches and a limit of one per 30 minutes, and shows them through `osascript`, because the notification framework needs an app bundle. They are off by default. `pmon install` copies all four tools to the support directory and doubles as the upgrade path; the daemon records its version at start, and `pmon status` points out a mismatch. `Support/release.sh` runs the tests, builds, strips, signs (ad-hoc unless `SIGN_IDENTITY` is set) and packs a tarball.
 
 `pmon why` is the most important output. Example of the target wording:
 

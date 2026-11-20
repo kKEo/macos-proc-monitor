@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build and test
+    # Apple Silicon runner with Xcode 16 (the package needs Swift 6 tools and macOS 14+).
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: swift --version
+
+      - uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Build
+        run: swift build
+
+      # Part of the suite reads the live machine (process table, top, ps, sample, footprint).
+      - name: Test
+        run: swift test
+
+      - name: Release build and package
+        run: SKIP_TESTS=1 Support/release.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pmon-${{ github.sha }}
+          path: dist/*.tar.gz
+          retention-days: 14

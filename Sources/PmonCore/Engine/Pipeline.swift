@@ -87,6 +87,19 @@ public final class Pipeline {
         return unknownCpuShare
     }
 
+    // Notices for the user.
+    /// A slowdown the user sits through for this long is worth a notice (once per episode).
+    public var longEpisodeSeconds = 120.0
+    private var notices: [Notice] = []
+    private var noticedEpisode: Int64?
+    private var lastFindingId: Int64 = 0
+
+    /// Things worth telling the user since the last call. Not stored; the daemon decides whether to show them.
+    public func takeNotices() -> [Notice] {
+        defer { notices.removeAll() }
+        return notices
+    }
+
     /// True while an episode is open or may be forming: the driver then samples at the fast
     /// cadence and asks `ps` for other users' processes on every sweep.
     public var wantsFastCadence: Bool { detector.wantsFastCadence }
@@ -118,6 +131,7 @@ public final class Pipeline {
         procStore = try ProcStore(db: db, bootId: bootId)
         appStore = AppStore(db: db)
         try db.transaction { try episodes.closeDangling() }
+        lastFindingId = try db.scalarInt("SELECT MAX(finding_id) FROM finding") ?? 0
     }
 
     public func ingest(_ record: TickRecord) throws {
@@ -157,6 +171,13 @@ public final class Pipeline {
             let day = ts / 86_400_000
             if day != lastBaselineDay { try findings.updateBaselines(now: ts); lastBaselineDay = day }
             try findings.run(now: ts, machineApp: procStore.machineApp)
+            try db.query("SELECT f.finding_id, f.kind, a.name FROM finding f JOIN app a USING (app_id) WHERE f.finding_id > ? AND f.status = 'open' ORDER BY f.finding_id",
+                         [lastFindingId]) { r in
+                lastFindingId = r.int(0)
+                let what = Self.findingNames[r.text(1)] ?? r.text(1)
+                // On the very first pass these are old news being rediscovered, not new findings.
+                if !firstRun { notices.append(Notice(kind: .finding, title: "pmon: \(what)", body: "\(r.text(2)). `pmon findings` has the details.")) }
+            }
         }
         if advanced.contains("1h") || firstRun || retentionBacklog {
             retentionBacklog = try retention.run(now: ts, rolledUpTo: try rollup.watermark("1m"))
@@ -399,6 +420,16 @@ public final class Pipeline {
             if let hang = lastHang, let app = hang.appId, Double(tick.wallMs - hang.ts) <= thresholds.hangSeconds * 1000 { hangApps.append(app) }
         }
         if case .closed(let end)? = transition { try closeEpisode(endTs: end, now: tick.wallMs) }
+        if let s = summary, noticedEpisode != s.id, Double(tick.wallMs - s.startTs) >= longEpisodeSeconds * 1000,
+           scores.index >= thresholds.closeAt,
+           session.map({ $0.idleSeconds < thresholds.presentIdleSeconds && $0.displayOn && !$0.locked }) ?? true {
+            noticedEpisode = s.id
+            let minutes = Int((Double(tick.wallMs - s.startTs) / 60_000).rounded())
+            let dominant = Scores.dimensions.max { scores.value($0) < scores.value($1) } ?? "cpu"
+            let busiest = try busiestApp(memory: dominant == "memory").map { " Busiest: \($0)." } ?? ""
+            notices.append(Notice(kind: .longEpisode, title: "Your Mac has been slow for \(minutes) minute\(minutes == 1 ? "" : "s")",
+                                  body: "\(Self.dimensionNames[dominant] ?? dominant).\(busiest) `pmon why` explains it."))
+        }
 
         for p in pendingBlame where tick.wallMs >= p.due {
             let rows = try blame.compute(episodeId: p.id, start: p.start, end: p.end, meanScores: p.means, hangApps: p.hangApps)
@@ -418,6 +449,26 @@ public final class Pipeline {
         let rows = try blame.compute(episodeId: s.id, start: s.startTs, end: endTs, meanScores: means, hangApps: hangApps)
         try episodes.replaceBlame(episodeId: s.id, rows, calculator: blame, start: s.startTs, end: endTs)
         pendingBlame.append((s.id, s.startTs, endTs, means, hangApps, now + 60_000))
+    }
+
+    static let dimensionNames = ["cpu": "CPU contention", "memory": "Memory pressure", "disk": "Disk saturation",
+                                 "thermal": "Thermal throttling", "gpu": "GPU saturation", "ui": "An unresponsive app"]
+    static let findingNames = ["leak_suspect": "possible memory leak", "runaway_cpu": "runaway background process",
+                               "wakeup_storm": "wakeup storm", "disk_writer": "heavy background disk writer",
+                               "anomaly": "unusual activity", "crash_loop": "crash loop", "disk_nearly_full": "disk nearly full"]
+
+    /// The app that used most CPU (or holds most memory) among readable processes in the latest sweep.
+    private func busiestApp(memory: Bool) throws -> String? {
+        guard let own = lastOwn else { return nil }
+        var byApp: [Int64: Int64] = [:]
+        for d in own.deltas where d.pid != own.selfPid {
+            guard let app = procStore.appIdByUid[d.uid] else { continue }
+            byApp[app, default: 0] += memory ? d.footprint : d.cpuMs
+        }
+        guard let top = byApp.max(by: { ($0.value, $1.key) < ($1.value, $0.key) }), top.value > 0 else { return nil }
+        var name: String?
+        try db.query("SELECT name FROM app WHERE app_id = ?", [top.key]) { name = $0.text(0) }
+        return name
     }
 
     /// The processes worth a closer look when an episode opens: the busiest and the largest of

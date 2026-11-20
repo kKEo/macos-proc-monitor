@@ -1,0 +1,38 @@
+name: Release
+
+# Push a tag like v0.1.0 to build, test and publish a release with the tarball attached.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build, test and package
+        run: Support/release.sh
+
+      - name: Check that the tag matches the built version
+        run: |
+          version="$(.build/release/pmon --version)"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the version in the code ($version); update PmonVersion in Sources/PmonCore/Config/Config.swift"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          shasum -a 256 "pmon-$VERSION.tar.gz" > "pmon-$VERSION.tar.gz.sha256"
+          gh release create "$GITHUB_REF_NAME" "pmon-$VERSION.tar.gz" "pmon-$VERSION.tar.gz.sha256" \
+            --title "pmon $VERSION" \
+            --notes "Unpack and run \`./install.sh\`. The binaries are ad-hoc signed and not notarised: after downloading, clear the quarantine flag with \`xattr -dr com.apple.quarantine pmon-$VERSION\`, or build from source."

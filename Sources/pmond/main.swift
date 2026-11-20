@@ -66,6 +66,9 @@ do {
                                     collectors: config.collectors, captures: captures, scanner: scanner,
                                     diskProbe: DiskProbe(path: captureDir + "/probe.bin"), helper: helper)
     var helperWasActive = false
+    var limiter = NoticeLimiter(config: config.notifications)
+    pipeline.longEpisodeSeconds = config.notifications.longEpisodeSeconds
+    collectors.addNote(CollectorNote(kind: "daemon_start", detail: #"{"version":"\#(PmonVersion.string)"}"#))
     var lastBattery: Int?
     var lastScanMono: UInt64 = 0
     var lastExpiryMono: UInt64?
@@ -84,6 +87,7 @@ do {
             try recorder?.append(rec)
             try pipeline.ingest(rec)
             failures = 0
+            for notice in pipeline.takeNotices() where limiter.allow(notice, nowMs: tick.wallMs) { Notifier.deliver(notice) }
             // The top child is not needed while the root helper answers; it resumes the moment it stops.
             if collectors.helperActive != helperWasActive {
                 helperWasActive = collectors.helperActive

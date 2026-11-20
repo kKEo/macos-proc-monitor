@@ -118,6 +118,13 @@ struct Status: ParsableCommand {
         let native = try database.scalarInt("SELECT COUNT(*) FROM process WHERE exited_ts IS NULL AND source = 0") ?? 0
         let foreign = try database.scalarInt("SELECT COUNT(*) FROM process WHERE exited_ts IS NULL AND source = 1") ?? 0
         let mode = try database.scalarInt("SELECT value FROM event WHERE kind = 'foreign_source' ORDER BY event_id DESC LIMIT 1")
+        var daemonVersion: String?
+        try database.query("SELECT detail FROM event WHERE kind = 'daemon_start' ORDER BY event_id DESC LIMIT 1") { r in
+            daemonVersion = (r.optText(0).flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) } as? [String: Any])?["version"] as? String
+        }
+        if let v = daemonVersion, v != PmonVersion.string {
+            line("version", "the daemon is \(v), this pmon is \(PmonVersion.string): run `pmon install` to bring them in line")
+        }
         let helped = try database.scalarInt("SELECT COUNT(*) FROM process WHERE exited_ts IS NULL AND source = 2") ?? 0
         line("root helper", helperSummary() + (helped > 0 ? "; \(helped) system processes read through it" : ""))
         var foreignDt = 1.0, foreignAge = ""

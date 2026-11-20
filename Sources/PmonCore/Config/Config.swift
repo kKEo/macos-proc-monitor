@@ -19,7 +19,10 @@ public enum PmonPaths {
     public static var log: String { supportDir + "/pmond.log" }
     /// Capture files live next to the database they belong to.
     public static func captures(forDatabase db: String) -> String { (db as NSString).deletingLastPathComponent + "/captures" }
-    public static var installedDaemon: String { supportDir + "/bin/pmond" }
+    public static var binDir: String { supportDir + "/bin" }
+    public static var installedDaemon: String { binDir + "/pmond" }
+    public static let menuLabel = "dev.pmon.menu"
+    public static var menuAgentPlist: String { NSHomeDirectory() + "/Library/LaunchAgents/\(menuLabel).plist" }
     public static var launchAgentPlist: String { NSHomeDirectory() + "/Library/LaunchAgents/\(label).plist" }
 
     /// Create the support directory, readable by the owner only.
@@ -49,6 +52,7 @@ public struct Config: Codable, Equatable, Sendable {
     public var collectors = CollectorConfig()
     /// Socket of the optional root helper. Used when present; never required.
     public var helperSocket = HelperPaths.socket
+    public var notifications = NotifyConfig()
 
     public init() {}
 
@@ -66,6 +70,7 @@ public struct Config: Codable, Equatable, Sendable {
         retention = try c.decodeIfPresent(RetentionPolicy.self, forKey: .retention) ?? d.retention
         collectors = try c.decodeIfPresent(CollectorConfig.self, forKey: .collectors) ?? d.collectors
         helperSocket = try c.decodeIfPresent(String.self, forKey: .helperSocket) ?? d.helperSocket
+        notifications = try c.decodeIfPresent(NotifyConfig.self, forKey: .notifications) ?? d.notifications
     }
 
     /// Load from `path`; a missing file yields the defaults, a malformed one is an error.

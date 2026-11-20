@@ -19,7 +19,35 @@ struct ConfigCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "config",
         abstract: "Show the optional collectors, their modes and what they cost; switch them.",
-        subcommands: [Show.self, Set.self], defaultSubcommand: Show.self)
+        subcommands: [Show.self, Set.self, Notifications.self], defaultSubcommand: Show.self)
+
+    struct Notifications: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Switch notifications for long slowdowns and new findings on or off.")
+
+        enum Switch: String, ExpressibleByArgument { case on, off }
+        @Argument(help: "on or off.") var state: Switch
+        @Option(help: "Configuration file.") var config: String = PmonPaths.config
+
+        func run() throws {
+            let current = try Config.load(path: config).notifications
+            var root = (FileManager.default.contents(atPath: config).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]) ?? [:]
+            var n = (root["notifications"] as? [String: Any]) ?? [:]
+            n["enabled"] = state == .on
+            root["notifications"] = n
+            try PmonPaths.ensureSupportDir()
+            try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]).write(to: URL(fileURLWithPath: config))
+            print("notifications: \(state.rawValue)")
+            if state == .on {
+                print("You will be told when a slowdown lasts \(Int(current.longEpisodeSeconds)) s while you are at the Mac, and about new findings;")
+                print("at most one notification every \(Int(current.minGapMinutes)) minutes. macOS shows them under \"Script Editor\".")
+            }
+            if config == PmonPaths.config, agentLoaded() {
+                let r = shell("/bin/launchctl", ["kickstart", "-k", "\(launchdDomain)/\(PmonPaths.label)"])
+                print(r.status == 0 ? "daemon restarted" : "could not restart the daemon")
+            }
+        }
+    }
 
     struct Show: ParsableCommand {
         static let configuration = CommandConfiguration(abstract: "List the optional collectors.")
@@ -46,6 +74,8 @@ struct ConfigCommand: ParsableCommand {
             print("Budget for triggered captures: one set per slowdown, \(c.maxCaptureSetsPerHour) per hour, none on battery below \(c.minBatteryPct) %.")
             print("Capture files: \(PmonPaths.captures(forDatabase: db)) (capped at \(c.captureCapMB) MB).")
             print("Change with `pmon config set <collector> <mode>`, or `pmon config set --recommended`.")
+            let n = try Config.load(path: config).notifications
+            print("Notifications: \(n.enabled ? "on" : "off") (`pmon config notifications on|off`).")
         }
 
         /// Costs observed on this machine: from past captures and scans in the database, and by
