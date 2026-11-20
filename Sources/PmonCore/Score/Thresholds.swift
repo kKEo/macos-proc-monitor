@@ -48,8 +48,9 @@ public struct Thresholds: Codable, Equatable, Sendable {
     public var memoryLeadSeconds = 600.0, thermalLeadSeconds = 300.0
     /// Shares below this are not stored.
     public var minShare = 0.02
-    /// A dimension must average at least this score over the episode to be blamed at all.
-    public var minDimensionScore = 10.0
+    /// A dimension must average at least this score over the episode to be blamed at all. Above the
+    /// standing contribution of a nearly full disk (about 20-25), which is not anyone's fault.
+    public var minDimensionScore = 30.0
 
     public init() {}
 

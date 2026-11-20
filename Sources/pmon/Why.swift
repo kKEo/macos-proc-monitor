@@ -180,7 +180,7 @@ struct Why: ParsableCommand {
         context.append(e.userPresent ? "you were at the Mac" : "nobody was at the Mac")
         if e.lowPower { context.append("Low Power Mode was on") } else if e.onBattery { context.append("on battery") }
         if e.afterWake { context.append("it began right after waking from sleep") }
-        out.append(context.joined(separator: "; ").prefix(1).uppercased() + context.joined(separator: "; ").dropFirst() + ".")
+        out.append("Context: " + context.joined(separator: "; ") + ".")
         return out.joined(separator: "\n")
     }
 }

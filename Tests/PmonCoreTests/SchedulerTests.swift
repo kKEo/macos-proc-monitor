@@ -90,3 +90,20 @@ final class SchedulerTests: XCTestCase {
         XCTAssertEqual(Array(seqs.prefix(3)), [0, 1, 2])
     }
 }
+
+extension SchedulerTests {
+    func testFasterCadenceTakesEffectImmediately() {
+        let lock = NSLock()
+        var times: [UInt64] = []
+        let s = Scheduler(clock: SystemClock(), planner: TickPlanner(systemSeconds: 3, processSeconds: 3, slowSeconds: 60)) { tick in
+            lock.lock(); times.append(tick.monoNs); lock.unlock()
+        }
+        s.start()
+        Thread.sleep(forTimeInterval: 0.3)                    // first tick has fired; the next is 3 s away
+        s.setIntervals(systemSeconds: 0.5, processSeconds: 0.5, slowSeconds: 60)
+        Thread.sleep(forTimeInterval: 1.4)
+        s.stop()
+        lock.lock(); let n = times.count; lock.unlock()
+        XCTAssertGreaterThanOrEqual(n, 3, "ticks at the new 0.5 s interval, without waiting out the old 3 s one")
+    }
+}

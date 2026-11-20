@@ -81,9 +81,13 @@ public final class Scheduler {
         workQueue.sync {}
     }
 
+    /// Change cadence. Takes effect at once: the pending timer is re-armed for the new interval,
+    /// so switching to a faster cadence does not wait out the old, longer one.
     public func setIntervals(systemSeconds: Double, processSeconds: Double, slowSeconds: Double) {
         timerQueue.async {
             self.planner.setIntervals(systemSeconds: systemSeconds, processSeconds: processSeconds, slowSeconds: slowSeconds)
+            guard self.timer != nil else { return }
+            self.arm(deadline: self.planner.nextDeadline(now: self.clock.monotonicNs))
         }
     }
 

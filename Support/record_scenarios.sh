@@ -4,6 +4,8 @@
 # to close and its blame to be finalised). Output: gzipped recordings in the test fixtures.
 # Usage: Support/record_scenarios.sh [scenario ...]     (default: all)
 cd "$(dirname "$0")/.."
+# Keep the Mac awake: a sleep in the middle of a scenario ruins the recording.
+[[ -z $CAFFEINATED ]] && exec env CAFFEINATED=1 caffeinate -i "$0" "$@"
 B=.build/release
 OUT=Tests/PmonCoreTests/Fixtures/scenarios
 WORK=$(mktemp -d)
@@ -25,11 +27,12 @@ record() {
 }
 
 cpu()      { $B/pmon-stress cpu --threads 16 --seconds 60 >/dev/null }
-memory()   { $B/pmon-stress memory --mb 2500 --rate 300 --seconds 40 --touch-every 3 >/dev/null }
+# More than the Mac has free (about 3.7 GB of 8), so the load's own pages are pushed out and paged back in.
+memory()   { $B/pmon-stress memory --mb 4000 --rate 400 --seconds 40 --touch-every 2 >/dev/null }
 disk()     { $B/pmon-stress disk --mb 512 --seconds 60 >/dev/null }
-mixed()    { $B/pmon-stress cpu --threads 16 --seconds 50 >/dev/null & $B/pmon-stress memory --mb 1500 --rate 300 --seconds 40 --touch-every 3 >/dev/null; wait }
+mixed()    { $B/pmon-stress cpu --threads 16 --seconds 55 >/dev/null & local c=$!; $B/pmon-stress memory --mb 3500 --rate 400 --seconds 40 --touch-every 2 >/dev/null; wait $c }
 quiet()    { sleep 60 }
-flapping() { for i in 1 2 3 4 5; do $B/pmon-stress cpu --threads 16 --seconds 10 >/dev/null; sleep 10; done }
+flapping() { for i in 1 2 3 4; do $B/pmon-stress cpu --threads 16 --seconds 20 >/dev/null; sleep 10; done }
 burst()    { $B/pmon-stress cpu --threads 16 --seconds 5 >/dev/null }
 
 scenarios=("$@")

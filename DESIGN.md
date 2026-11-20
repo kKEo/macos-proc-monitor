@@ -353,9 +353,29 @@ For each closed episode, for each app, for each dimension, compute a share from 
 
 **Fast cadence.** While an episode is open, or the index is at or above 40, the daemon samples system and processes every 2 s and runs `ps` on every sweep, overriding the relaxed and asleep cadences.
 
-**Blame.** Computed from `app_sample` when the episode closes and once more 60 s later, when top-stream data covering its last seconds has arrived. Only dimensions that averaged at least 10 are blamed, and only shares of at least 2 % are stored. Victims are identified in two dimensions: memory (many page-ins while holding and growing little) and CPU (a large share of the waiting with a small share of the CPU); they are stored with role `victim` and a score of 0. `episode_blame.detail` holds the numbers behind each share (held and grown memory, CPU percentage, megabytes of I/O) so explanations do not depend on raw samples that expire. Thermal blame uses energy, which is only known for natively read processes.
+**Blame.** Computed from `app_sample` when the episode closes and once more 60 s later, when top-stream data covering its last seconds has arrived. Only dimensions that averaged at least 30 are blamed (above the standing 20–25 that a nearly full disk contributes), and only shares of at least 2 % are stored. Victims are identified in two dimensions: memory (many page-ins while holding and growing little) and CPU (a large share of the waiting with a small share of the CPU); they are stored with role `victim` and a score of 0. `episode_blame.detail` holds the numbers behind each share (held and grown memory, CPU percentage, megabytes of I/O) so explanations do not depend on raw samples that expire. Thermal blame uses energy, which is only known for natively read processes.
 
 **Commands.** `pmon why [--at TIME]`, `pmon episodes [--since 24h] [--all]`, `pmon mark [note]` (writes a `mark` event), and `pmon calibrate <recording> [--thresholds file] [--samples]`, which replays a recording with candidate thresholds and prints the episodes, their blame and how many marks fall inside them.
+
+**Scenario results (2026-11-20).** Seven known loads were recorded on the development machine and replayed; they are regression tests in `ScenarioTests`. Every load was started from a terminal, so the terminal app is the expected culprit, with `pmon-stress` as its top process.
+
+| Scenario | Load | Result |
+|---|---|---|
+| quiet | Nothing for a minute | No episode; index never reached 40 |
+| burst | 16 threads for 5 s | No episode; the index shows the blip |
+| cpu | 16 threads on 8 cores, 60 s | One CPU episode, 55 s, peak 100; terminal app 97 % of the blame |
+| disk | Uncached reads of a 512 MB file, 60 s | One disk episode, 53 s; terminal app 98 % |
+| flapping | 16 threads, 20 s on / 10 s off, four times | One CPU episode, 1.7 min; terminal app 91 % |
+| memory | 4 GB of incompressible memory, re-touched every 2 s | One memory episode of 6 s; terminal app 68 % (held 5.3 GB, grew 3.9 GB) |
+| mixed | 16 threads for 55 s plus 3.5 GB | One CPU episode, 50 s; terminal app 93 % |
+
+Three things the recordings showed:
+
+- **Sustained memory thrashing could not be produced safely.** The kernel absorbed 4 GB on an 8 GB machine in about ten seconds by compressing and swapping other apps (swap grew by 0.7 GB), after which the load's own pages stayed resident. Forcing real thrashing would mean cycling several gigabytes through swap on a disk that is 95 % full. The memory thresholds are therefore validated for a spike only; sustained pressure waits for calibration against real use.
+- **Switching to the fast cadence must be immediate.** At first the new interval only applied after the pending tick, up to 5 s late, and 10-second bursts were mostly missed. The scheduler now re-arms its timer when the cadence changes.
+- **A standing score must not attract blame.** The nearly full disk contributes a constant 20–25 to the disk score; with a blame cut-off of 10 every CPU episode also "blamed" disk. The cut-off is now 30.
+
+**Not yet done:** calibration against a week of real use with manual marks (`pmon mark`). Until then the thresholds rest on these synthetic scenarios and the idle baseline.
 
 ### 8.4 Findings outside episodes
 

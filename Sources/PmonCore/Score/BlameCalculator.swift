@@ -188,13 +188,18 @@ struct EpisodeStore {
     func replaceBlame(episodeId: Int64, _ rows: [BlameRow], calculator: BlameCalculator, start: Int64, end: Int64) throws {
         try db.run("DELETE FROM episode_blame WHERE episode_id = ?", [episodeId])
         for r in rows {
+            // Confidence follows the process that dominates the app's share: an app made of natively
+            // read processes stays "high" even if a minor system-owned helper belongs to it too.
+            let top = try calculator.topProcess(appId: r.appId, dim: r.dim, start: start, end: end)
+            var confidence = r.confidence
+            if confidence == 1, let top, try db.scalarInt("SELECT source FROM process WHERE proc_id = ?", [top]) == 0 { confidence = 2 }
             let detail = (try? JSONSerialization.data(withJSONObject: r.detail.mapValues { ($0 * 100).rounded() / 100 }, options: [.sortedKeys]))
                 .map { String(decoding: $0, as: UTF8.self) }
             try db.run("""
                 INSERT OR REPLACE INTO episode_blame (episode_id, app_id, dim, share, score, role, confidence, top_proc_id, peak_value, detail)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, [episodeId, r.appId, r.dim, (r.share * 10000).rounded() / 10000, (r.score * 10000).rounded() / 10000, r.role, r.confidence,
-                      try calculator.topProcess(appId: r.appId, dim: r.dim, start: start, end: end), r.peakValue, detail])
+                """, [episodeId, r.appId, r.dim, (r.share * 10000).rounded() / 10000, (r.score * 10000).rounded() / 10000, r.role, confidence,
+                      top, r.peakValue, detail])
         }
     }
 }
