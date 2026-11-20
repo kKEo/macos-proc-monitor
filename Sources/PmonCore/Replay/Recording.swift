@@ -44,7 +44,8 @@ public final class Recorder {
 public enum Replayer {
     /// Returns the number of tick records replayed.
     @discardableResult
-    public static func replay(recording path: String, into db: Database, thresholds: Thresholds = Thresholds()) throws -> Int {
+    public static func replay(recording path: String, into db: Database, thresholds: Thresholds = Thresholds(),
+                              retention: RetentionPolicy = RetentionPolicy()) throws -> Int {
         guard let text = try? readText(path) else {
             throw CocoaError(.fileReadNoSuchFile, userInfo: [NSFilePathErrorKey: path])
         }
@@ -52,7 +53,7 @@ public enum Replayer {
         var lines = text.split(separator: "\n", omittingEmptySubsequences: true).makeIterator()
         guard let first = lines.next() else { return 0 }
         let header = try decoder.decode(RecordingHeader.self, from: Data(first.utf8))
-        let pipeline = try Pipeline(db: db, host: header.host, thresholds: thresholds)
+        let pipeline = try Pipeline(db: db, host: header.host, thresholds: thresholds, retention: retention)
         var n = 0
         while let line = lines.next() {
             try pipeline.ingest(decoder.decode(TickRecord.self, from: Data(line.utf8)))

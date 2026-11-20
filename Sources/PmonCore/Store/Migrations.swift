@@ -30,6 +30,11 @@ public enum Migrations {
         (5, """
             ALTER TABLE episode_blame ADD COLUMN detail TEXT;
             """),
+        // 6: small key-value state (rollup watermarks), and findings looked up by kind and app.
+        (6, """
+            CREATE TABLE state (key TEXT PRIMARY KEY, value INTEGER NOT NULL) WITHOUT ROWID;
+            CREATE INDEX finding_open ON finding(status, kind, app_id);
+            """),
     ]
 
     public static var latestVersion: Int { steps.last!.version }

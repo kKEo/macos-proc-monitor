@@ -34,6 +34,8 @@ final class ProcStore {
     private(set) var uidByPidLive: [Int32: UInt64] = [:]
     /// Rows of the synthetic apps that make totals reconcile.
     private(set) var foreignResidualApp: Int64 = 0, unattributedApp: Int64 = 0, otherApp: Int64 = 0
+    /// Stands for the machine itself, for findings that are nobody's fault (a nearly full disk).
+    private(set) var machineApp: Int64 = 0
     /// Processes that are an app's own main process (attributed by their bundle), for launch and quit events.
     private(set) var appMainProcs: [UInt64: Int64] = [:]
 
@@ -45,6 +47,7 @@ final class ProcStore {
         foreignResidualApp = try appId(AppRef(key: "system.foreign", name: "System processes (combined)", kind: "system", bundlePath: nil, inheritable: false), ts: nil)
         unattributedApp = try appId(AppRef(key: "system.unattributed", name: "Kernel and short-lived processes", kind: "system", bundlePath: nil, inheritable: false), ts: nil)
         otherApp = try appId(AppRef(key: "pmon.other", name: "Idle apps (combined)", kind: "system", bundlePath: nil, inheritable: false), ts: nil)
+        machineApp = try appId(AppRef(key: "system.machine", name: "This Mac", kind: "system", bundlePath: nil, inheritable: false), ts: nil)
     }
 
     func appId(_ app: AppRef, ts: Int64?) throws -> Int64 {

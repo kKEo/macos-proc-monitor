@@ -54,6 +54,15 @@ public final class Pipeline {
     /// Episodes whose blame is recomputed once late top-stream data has arrived.
     private var pendingBlame: [(id: Int64, start: Int64, end: Int64, means: [String: Double], hangApps: [Int64], due: Int64)] = []
 
+    // Housekeeping: rollups every minute, findings and retention every hour.
+    private let rollup: Rollup
+    private let retention: Retention
+    private let findings: Findings
+    private var lastMaintenanceMinute: Int64?
+    private var lastBaselineDay: Int64?
+    private var retentionBacklog = false
+    private var needsVacuum = false
+
     /// True while an episode is open or may be forming: the driver then samples at the fast
     /// cadence and asks `ps` for other users' processes on every sweep.
     public var wantsFastCadence: Bool { detector.wantsFastCadence }
@@ -65,7 +74,7 @@ public final class Pipeline {
     public var backoffLevel: Int { limiter.level }
     public var backoffMultiplier: Double { limiter.intervalMultiplier }
 
-    public init(db: Database, host: HostInfo, thresholds: Thresholds = Thresholds()) throws {
+    public init(db: Database, host: HostInfo, thresholds: Thresholds = Thresholds(), retention policy: RetentionPolicy = RetentionPolicy()) throws {
         self.db = db
         self.host = host
         self.thresholds = thresholds
@@ -73,6 +82,9 @@ public final class Pipeline {
         detector = EpisodeDetector(thresholds: thresholds)
         episodes = EpisodeStore(db: db)
         blame = BlameCalculator(db: db, thresholds: thresholds)
+        rollup = Rollup(db: db)
+        retention = Retention(db: db, policy: policy)
+        findings = Findings(db: db)
         try Migrations.migrate(db)
         let bootId: Int64 = try db.transaction {
             try Dimensions.upsertHost(db, host)
@@ -87,7 +99,34 @@ public final class Pipeline {
     public func ingest(_ rec: TickRecord) throws {
         ticksIngested += 1
         if let slow = rec.slow { lastSlow = slow }
-        try db.transaction { try ingestInTransaction(rec) }
+        try db.transaction {
+            try ingestInTransaction(rec)
+            try maintain(ts: rec.tick.wallMs)
+        }
+        // Give freed pages back to the file system, a little at a time. Not possible inside a transaction.
+        if needsVacuum {
+            needsVacuum = false
+            try? db.exec("PRAGMA incremental_vacuum(1000)")
+        }
+    }
+
+    /// Rollups once a minute; findings, baselines and retention when an hour completes, and
+    /// once right after start-up. Driven by tick time, so a replay does exactly the same.
+    private func maintain(ts: Int64) throws {
+        let minute = ts / 60_000
+        guard minute != lastMaintenanceMinute else { return }
+        let firstRun = lastMaintenanceMinute == nil
+        lastMaintenanceMinute = minute
+        let advanced = try rollup.run(now: ts)
+        if advanced.contains("1h") || firstRun {
+            let day = ts / 86_400_000
+            if day != lastBaselineDay { try findings.updateBaselines(now: ts); lastBaselineDay = day }
+            try findings.run(now: ts, machineApp: procStore.machineApp)
+        }
+        if advanced.contains("1h") || firstRun || retentionBacklog {
+            retentionBacklog = try retention.run(now: ts, rolledUpTo: try rollup.watermark("1m"))
+            needsVacuum = true
+        }
     }
 
     // MARK: - One tick

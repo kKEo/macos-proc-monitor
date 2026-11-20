@@ -35,7 +35,7 @@ struct AppAgg {
     /// Worth its own row? Everything else is summed into the "idle apps" row, so totals still add up.
     func significant(dtMs: Int64) -> Bool {
         (cpuMs ?? 0) * 2000 >= max(dtMs, 1)            // 0.05 % of a core
-            || (diskRead ?? 0) + (diskWrite ?? 0) > 0
+            || (diskRead ?? 0) + (diskWrite ?? 0) >= 65_536
             || abs(dFootprint ?? 0) >= 1 << 20
             || (footprint ?? 0) >= 100 << 20
     }

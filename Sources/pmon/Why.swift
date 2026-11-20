@@ -8,7 +8,9 @@ enum Fmt {
     static func size(mb: Double) -> String { mb >= 1024 ? num(mb / 1024, 1) + " GB" : num(mb) + " MB" }
     static func duration(_ ms: Int64) -> String {
         let s = Double(ms) / 1000
-        return s < 90 ? num(s) + " s" : num(s / 60, s < 600 ? 1 : 0) + " min"
+        if s < 90 { return num(s) + " s" }
+        if s < 5400 { return num(s / 60, s < 600 ? 1 : 0) + " min" }
+        return num(s / 3600, 1) + " h"
     }
     static func clock(_ ms: Int64, seconds: Bool = false) -> String {
         let f = DateFormatter()
@@ -117,6 +119,8 @@ struct Why: ParsableCommand {
     @Option(help: "Time of interest, e.g. 14:32 or \"2026-11-20 14:32\". Default: now.")
     var at: String?
 
+    @Flag(help: "Output JSON.") var json = false
+
     @Option(help: "Database file.")
     var db: String = PmonPaths.database
 
@@ -134,6 +138,10 @@ struct Why: ParsableCommand {
             LIMIT 1
             """, [target, now]) { episode = Episode($0) }
 
+        if json {
+            printJSON(try episode.map { $0.json(now: now, blame: try loadBlame(database, episode: $0.id)) } ?? ["episode": NSNull()])
+            return
+        }
         guard let e = episode else {
             print("No slowdown recorded within an hour of \(Fmt.clock(target)).")
             try database.query("SELECT y.slug_index, y.s_cpu, y.s_mem, y.s_disk, y.s_thermal, y.s_ui FROM sys_sample y JOIN sample s USING (sample_id) WHERE s.ts <= ? AND y.slug_index IS NOT NULL ORDER BY s.sample_id DESC LIMIT 1", [target]) { r in
@@ -194,6 +202,8 @@ struct Episodes: ParsableCommand {
     @Flag(help: "Include episodes during which nobody was at the Mac.")
     var all = false
 
+    @Flag(help: "Output JSON.") var json = false
+
     @Option(help: "Database file.")
     var db: String = PmonPaths.database
 
@@ -205,6 +215,10 @@ struct Episodes: ParsableCommand {
             list.append(Episode($0))
         }
         let shown = all ? list : list.filter { $0.userPresent || $0.end == nil }
+        if json {
+            printJSON(try shown.map { $0.json(now: now, blame: try loadBlame(database, episode: $0.id)) })
+            return
+        }
         guard !shown.isEmpty else {
             print("No slowdowns in the last \(since)\(list.isEmpty ? "" : " while you were at the Mac (\(list.count) while away; --all shows them)").")
             return

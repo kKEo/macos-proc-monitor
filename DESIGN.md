@@ -631,6 +631,16 @@ CREATE TABLE sys_rollup_1h (
 
 Steady state is under 200 MB. Deletion is by `sample_id` range, which is a cheap prefix delete on every fact table; `PRAGMA auto_vacuum=INCREMENTAL` returns the space.
 
+**As built (phase 6).**
+
+- **Rollups** run inside the pipeline once a minute, driven by tick time, so a replay produces the same rows. A minute is rolled two minutes after it ends, by which time late top-stream data for it has arrived. Hours are rolled from minutes and days from hours, each only when complete in the finer grain. Watermarks live in a small `state` table (migration 6). Rolling a range deletes and rewrites it, so a second run changes nothing. Buckets are aligned to UTC.
+- **Idle apps are folded in the rollups too.** An app keeps its own row in a minute only if it used 60 ms of CPU, did 1 MB of I/O, holds 100 MB or was in focus; the rest is summed into `pmon.other`. Measured: 35 rows per minute instead of over 200, with identical totals.
+- **`blame` in the app rollups** is sluggish-minutes caused, credited to the minute in which the episode ended.
+- **Retention** runs when an hour completes (and in batches of 4 000 samples each minute while there is a backlog). Raw samples are deleted only after they have been rolled up, and never from an episode's window (five minutes either side) until that is 30 days old. Process rows of long-exited processes that nothing refers to are removed. Freed pages are returned with an incremental vacuum.
+- **Findings** are evaluated hourly from the rollups. Two changes from the list in 8.4: `crash_loop` is three or more of the system's own crash reports for one app within an hour (counting process starts flagged every helper at daemon start, then every build, then launchd's on-demand Spotlight workers on the live machine); and `disk_nearly_full` was added, attached to a synthetic app "This Mac". "Background tax" is a report (`pmon top`), not a finding.
+- **Baselines** are recomputed daily from four weeks of hourly rollups: median and 95th percentile of CPU and footprint per app, for all hours together and per hour of the week (UTC). The anomaly rule uses the all-hours baseline and needs at least 24 hours of history.
+- **Reports** read through one query layer that picks the rollup grain from the time range and falls back to a finer grain while a young database has no complete hours or days yet.
+
 ### 9.5 Why this shape reports well
 
 - **Blame is pre-computed and additive.** "Who slowed me down this month" is a `SUM` over `episode_blame`, not a re-analysis of raw samples that have already expired.
@@ -690,7 +700,7 @@ GROUP BY a.app_id HAVING pct_in_front < 5 ORDER BY cpu_min DESC LIMIT 10;
 | `pmon app <name>` | One app: trend, baseline, episodes it caused, findings |
 | `pmon findings` | Leaks, runaways, storms, anomalies |
 | `pmon report --since 7d --html` | Self-contained HTML file: timeline, offenders, findings |
-| `pmon export --format json\|csv` | Raw access for other tools |
+| `pmon export <episodes\|blame\|findings\|apps\|system\|events> --format json\|csv` | Raw access for other tools |
 
 Every command takes `--json`. The HTML report is a generated static file, not a server; nothing listens on a port. A menu-bar item showing the live index is a natural later addition and needs no schema change.
 

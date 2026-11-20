@@ -9,7 +9,7 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(db.userVersion, Migrations.latestVersion)
         XCTAssertEqual(try Migrations.migrate(db), 0, "second run applies nothing")
         let tables = try db.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'")
-        XCTAssertEqual(tables, 23)
+        XCTAssertEqual(tables, 24)
         for t in ["sample", "sys_sample", "proc_sample", "app_sample", "episode", "episode_blame", "app_rollup_1m", "app_rollup_1h", "app_rollup_1d", "sys_rollup_1d"] {
             XCTAssertEqual(try db.scalarInt("SELECT COUNT(*) FROM sqlite_master WHERE name = ?", [t]), 1, t)
         }

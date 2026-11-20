@@ -41,6 +41,8 @@ public struct Config: Codable, Equatable, Sendable {
     public var relaxWhenIdle = true
     /// Tunable numbers of the sluggishness model; any subset may be given.
     public var thresholds = Thresholds()
+    /// How long raw samples and rollups are kept.
+    public var retention = RetentionPolicy()
 
     public init() {}
 
@@ -55,6 +57,7 @@ public struct Config: Codable, Equatable, Sendable {
         topStreamEnabled = try c.decodeIfPresent(Bool.self, forKey: .topStreamEnabled) ?? d.topStreamEnabled
         relaxWhenIdle = try c.decodeIfPresent(Bool.self, forKey: .relaxWhenIdle) ?? d.relaxWhenIdle
         thresholds = try c.decodeIfPresent(Thresholds.self, forKey: .thresholds) ?? d.thresholds
+        retention = try c.decodeIfPresent(RetentionPolicy.self, forKey: .retention) ?? d.retention
     }
 
     /// Load from `path`; a missing file yields the defaults, a malformed one is an error.

@@ -8,12 +8,16 @@ struct Status: ParsableCommand {
     @Option(help: "Database file.")
     var db: String = PmonPaths.database
 
+    @Flag(help: "Output JSON: the latest sample and the current top applications.")
+    var json = false
+
     func run() throws {
         guard FileManager.default.fileExists(atPath: db) else {
             print("No database at \(db). Start the daemon with `pmon install`.")
             throw ExitCode(1)
         }
         let database = try Database(path: db, readOnly: true)
+        if json { try printStatusJSON(database); return }
 
         var pCores = 4.0, eCores = 4.0
         try database.query("SELECT model, chip, p_cores, e_cores, mem_bytes FROM host WHERE host_id = 1") { r in
@@ -66,6 +70,35 @@ struct Status: ParsableCommand {
             sum + (((try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber)?.int64Value ?? 0)
         }
         line("history", "\(lastHour) samples in the last hour, \(totalSamples) in total, \(wakes) wake-ups recorded, database \(bytes(size))")
+    }
+
+    private func printStatusJSON(_ database: Database) throws {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        var sample: [String: Any] = [:]
+        try database.query("SELECT s.ts, s.dt_ms, y.* FROM sample s JOIN sys_sample y USING (sample_id) ORDER BY s.sample_id DESC LIMIT 1") { r in
+            for i in 0..<r.columnCount where !r.isNull(i) {
+                let text = r.text(i)
+                sample[r.name(i)] = Int64(text).map { $0 as Any } ?? Double(text).map { $0 as Any } ?? text
+            }
+        }
+        var apps: [[String: Any]] = []
+        var windowMs = 0.0
+        try database.query("SELECT SUM(proc_dt_ms) FROM sample WHERE proc_dt_ms IS NOT NULL AND ts BETWEEN ? AND ?", [now - 100_000, now - 40_000]) { windowMs = $0.double(0) }
+        if windowMs > 0 {
+            try database.query("""
+                SELECT a.name, a.kind, SUM(x.cpu_ms) * 100.0 / ?, MAX(x.footprint), MAX(x.is_focus)
+                FROM app_sample x JOIN sample s USING (sample_id) JOIN app a USING (app_id)
+                WHERE s.ts BETWEEN ? AND ? AND a.key != 'pmon.other' GROUP BY a.app_id ORDER BY 3 DESC LIMIT 10
+                """, [windowMs, now - 100_000, now - 40_000]) { r in
+                apps.append(["app": r.text(0), "kind": r.text(1), "cpu_pct": r.double(2), "footprint_bytes": r.optInt(3) ?? NSNull(), "in_focus": r.int(4) == 1])
+            }
+        }
+        var daemonPid: Any = NSNull()
+        if let text = try? String(contentsOfFile: PmonPaths.lock(forDatabase: db), encoding: .utf8),
+           let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)), kill(pid, 0) == 0 { daemonPid = Int(pid) }
+        let open = try database.scalarInt("SELECT COUNT(*) FROM episode WHERE end_ts IS NULL") ?? 0
+        printJSON(["version": PmonVersion.string, "daemon_pid": daemonPid, "agent_loaded": agentLoaded(), "sample": sample,
+                   "top_apps": apps, "episode_in_progress": open > 0])
     }
 
     /// Process counts, the monitor's own cost, and the busiest processes of the latest sweep.

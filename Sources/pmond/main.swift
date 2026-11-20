@@ -48,7 +48,7 @@ do {
     let config = try Config.load(path: configPath)
     let host = HostInfo.current()
     let db = try Database(path: dbPath)
-    let pipeline = try Pipeline(db: db, host: host, thresholds: config.thresholds)
+    let pipeline = try Pipeline(db: db, host: host, thresholds: config.thresholds, retention: config.retention)
     let recorder = try recordPath.map { try Recorder(path: $0, host: host, capMB: config.recordingCapMB) }
     // The top stream covers processes of other users; without it, ps does (at higher cost).
     let topStream = config.topStreamEnabled
