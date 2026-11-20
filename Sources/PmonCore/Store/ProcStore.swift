@@ -9,6 +9,8 @@ public struct SelectionReason: OptionSet, Sendable {
     public static let floor = SelectionReason(rawValue: 4)
     /// The daemon itself: always stored, so its own cost is always visible.
     public static let selfProcess = SelectionReason(rawValue: 8)
+    /// CPU columns of this (foreign) row come from `ps` and cover `proc_dt_ms`.
+    public static let cpuFromPs = SelectionReason(rawValue: 16)
 }
 
 /// Process and executable dimension rows, and the `proc_sample` fact rows.
@@ -103,6 +105,21 @@ final class ProcStore {
     }
 }
 
+extension ProcStore {
+    /// A row for a process read through `top` or `ps`. Columns the source lacks stay NULL.
+    func insertForeign(sampleId: Int64, _ d: ForeignDelta, reason: SelectionReason) throws {
+        guard let procId = procIds[d.uid] else { return }
+        var reason = reason
+        if d.cpuFromPs { reason.insert(.cpuFromPs) }
+        try db.run("""
+            INSERT OR REPLACE INTO proc_sample (sample_id, proc_id, cpu_user_ms, cpu_sys_ms, footprint, mem_compressed, d_footprint,
+              d_pageins, d_wakeups, d_csw, d_instructions, threads, fidelity, reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, [sampleId, procId, d.cpuUserMs, d.cpuSysMs, d.footprint, d.compressed, d.dFootprint,
+                  d.dPageins, d.dWakeups, d.dCsw, d.dInstructions, d.threads, d.fidelity, reason.rawValue])
+    }
+}
+
 /// Decides which processes get a detail row. Provisional: phase 4 replaces this with the
 /// full top-K-per-dimension rule once app-level rows carry the complete totals.
 enum ProvisionalSelection {
@@ -120,6 +137,20 @@ enum ProvisionalSelection {
                 reasons[d.uid, default: []].insert(.floor)
             }
             if d.pid == selfPid { reasons[d.uid, default: []].insert(.selfProcess) }
+        }
+        return deltas.compactMap { d in reasons[d.uid].map { (d, $0) } }
+    }
+
+    /// Same rule for foreign processes. `dtMs` scales the CPU floor to the interval covered.
+    static func selectForeign(_ deltas: [ForeignDelta], dtMs: Int64) -> [(ForeignDelta, SelectionReason)] {
+        var reasons: [UInt64: SelectionReason] = [:]
+        for d in deltas.sorted(by: { $0.cpuNs > $1.cpuNs }).prefix(topK) where d.cpuNs > 0 { reasons[d.uid, default: []].insert(.topCpu) }
+        for d in deltas.filter({ $0.footprint != nil }).sorted(by: { $0.footprint! > $1.footprint! }).prefix(topK) {
+            reasons[d.uid, default: []].insert(.topFootprint)
+        }
+        let cpuFloorNs = UInt64(max(dtMs, 1)) * 2_000            // 0.2 % of a core over the interval
+        for d in deltas where d.cpuNs >= cpuFloorNs || abs(d.dFootprint ?? 0) >= footprintDeltaFloor {
+            reasons[d.uid, default: []].insert(.floor)
         }
         return deltas.compactMap { d in reasons[d.uid].map { (d, $0) } }
     }

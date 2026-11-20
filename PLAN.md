@@ -49,7 +49,7 @@ Dependency direction: `Model` ← `Collect`, `Engine`, `Attribute`, `Score` ← 
 | 0 | Validate assumptions — **done 2026-11-20, decision: go** (findings in `DESIGN.md` 2.1) | 0.1 – 0.5 | — | 1–2 days |
 | 1 | Foundation — **implemented 2026-11-20**; daemon installed, 24-hour exit check in progress | 1.1 – 1.7 | 0 | 3–5 days |
 | 2 | Own processes — **implemented 2026-11-20** | 2.1 – 2.5 | 1 | 3–5 days |
-| 3 | Full coverage without root | 3.1 – 3.5 | 2 | 3–5 days |
+| 3 | Full coverage without root — **implemented 2026-11-20** | 3.1 – 3.5 | 2 | 3–5 days |
 | 4 | Applications and context | 4.1 – 4.6 | 3 | 3–5 days |
 | 5 | Detect and blame | 5.1 – 5.6 | 4 | 1–2 weeks |
 | 6 | History and reports | 6.1 – 6.6 | 5 | 1–2 weeks |

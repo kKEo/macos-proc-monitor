@@ -164,7 +164,7 @@ final class SelfLimiterTests: XCTestCase {
 final class ProcessPipelineTests: XCTestCase {
     /// Drive a pipeline with system ticks every 5 s and process sweeps every 10 s.
     final class Rig {
-        let clock = FakeClock()
+        let clock = FakeClock(monotonicNs: 100_000_000_000)     // well after boot, so tests can refer to earlier moments
         var planner = TickPlanner(systemSeconds: 5, processSeconds: 10, slowSeconds: 60)
         var machine = FakeMachine()
         var fake = FakeProcs()

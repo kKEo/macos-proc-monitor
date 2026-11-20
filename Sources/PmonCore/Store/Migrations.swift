@@ -14,6 +14,14 @@ public enum Migrations {
             ALTER TABLE app_rollup_1h ADD COLUMN cpu_util_ms INTEGER;
             ALTER TABLE app_rollup_1d ADD COLUMN cpu_util_ms INTEGER;
             """),
+        // 3: processes of other users arrive from the top stream on their own, longer interval,
+        //    and the residuals that make totals reconcile.
+        (3, """
+            ALTER TABLE sample ADD COLUMN foreign_dt_ms INTEGER;
+            ALTER TABLE sys_sample ADD COLUMN foreign_cpu_ms INTEGER;
+            ALTER TABLE sys_sample ADD COLUMN unknown_cpu_ms INTEGER;
+            ALTER TABLE sys_sample ADD COLUMN unattributed_disk_bytes INTEGER;
+            """),
     ]
 
     public static var latestVersion: Int { steps.last!.version }

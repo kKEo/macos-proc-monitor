@@ -50,7 +50,11 @@ do {
     let db = try Database(path: dbPath)
     let pipeline = try Pipeline(db: db, host: host)
     let recorder = try recordPath.map { try Recorder(path: $0, host: host, capMB: config.recordingCapMB) }
-    let collectors = LiveCollectors()
+    // The top stream covers processes of other users; without it, ps does (at higher cost).
+    let topStream = config.topStreamEnabled
+        ? TopStream(intervalSeconds: Int(config.foreignIntervalSeconds), pidFile: dbPath + ".top.pid") : nil
+    topStream?.start()
+    let collectors = LiveCollectors(topStream: topStream)
 
     var failures = 0
     var appliedBackoff = 0
@@ -88,6 +92,7 @@ do {
         let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
         src.setEventHandler {
             scheduler.stop()
+            topStream?.stop()
             recorder?.close()
             Log.info("stopped after \(pipeline.ticksIngested) ticks, \(pipeline.samplesWritten) samples")
             exit(0)

@@ -9,6 +9,8 @@ public struct SampleFlags: OptionSet, Sendable {
     public static let helperPresent = SampleFlags(rawValue: 4)
     public static let foreignFresh = SampleFlags(rawValue: 8)
     public static let episodeOpen = SampleFlags(rawValue: 16)
+    /// Foreign CPU on this tick comes from `ps` and covers `proc_dt_ms` instead of `foreign_dt_ms`.
+    public static let foreignCpuFromPs = SampleFlags(rawValue: 32)
 }
 
 /// Dimension rows for the machine and the current boot.
@@ -41,6 +43,13 @@ struct ProcTotals {
     /// System busy CPU not accounted for by any process we read. Nil when the system
     /// counters did not cover the whole process interval.
     var unattributedCpuMs: Int64?
+    /// Device bytes not accounted for by readable processes (other users' processes, the kernel,
+    /// swap). Approximate: device and per-process counters are not measured the same way.
+    var unattributedDiskBytes: Int64?
+    /// CPU measured for other users' processes, and what is left after them: kernel work and
+    /// processes that lived and died between sweeps. Signed, so over-attribution is visible.
+    var foreignCpuMs: Int64?
+    var unknownCpuMs: Int64?
 }
 
 /// Writes one tick's results in a single transaction.
@@ -50,9 +59,9 @@ struct Writer {
     let pageSize: Int64
 
     /// Insert the `sample` row and return its id.
-    func insertSample(tick: Tick, tier: Int, flags: SampleFlags, procDtMs: Int64? = nil) throws -> Int64 {
-        try db.run("INSERT INTO sample (ts, boot_id, dt_ms, proc_dt_ms, tier, flags) VALUES (?, ?, ?, ?, ?, ?)",
-                   [tick.wallMs, bootId, Int64(tick.dtNs / 1_000_000), procDtMs, tier, flags.rawValue])
+    func insertSample(tick: Tick, tier: Int, flags: SampleFlags, procDtMs: Int64? = nil, foreignDtMs: Int64? = nil) throws -> Int64 {
+        try db.run("INSERT INTO sample (ts, boot_id, dt_ms, proc_dt_ms, foreign_dt_ms, tier, flags) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                   [tick.wallMs, bootId, Int64(tick.dtNs / 1_000_000), procDtMs, foreignDtMs, tier, flags.rawValue])
         return db.lastInsertRowId
     }
 
@@ -65,6 +74,8 @@ struct Writer {
         let cols: [(String, Any?)] = [
             ("proc_count", procs?.procCount), ("thread_count", procs?.threadCount),
             ("runnable_wait_ms", procs?.waitMs), ("unattributed_cpu_ms", procs?.unattributedCpuMs),
+            ("unattributed_disk_bytes", procs?.unattributedDiskBytes),
+            ("foreign_cpu_ms", procs?.foreignCpuMs), ("unknown_cpu_ms", procs?.unknownCpuMs),
             ("sample_id", sampleId),
             ("cpu_user_ms", d.cpuUserMs), ("cpu_sys_ms", d.cpuSysMs), ("cpu_idle_ms", d.cpuIdleMs),
             ("p_busy_ms", d.pBusyMs), ("e_busy_ms", d.eBusyMs),

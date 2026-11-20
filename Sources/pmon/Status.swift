@@ -72,16 +72,33 @@ struct Status: ParsableCommand {
     private func processSection(_ database: Database, now: Int64) throws {
         var sampleId: Int64?, procDt = 1.0
         try database.query("""
-            SELECT s.sample_id, s.proc_dt_ms, y.proc_count, y.thread_count, y.runnable_wait_ms, y.unattributed_cpu_ms
+            SELECT s.sample_id, s.proc_dt_ms, y.proc_count, y.thread_count, y.runnable_wait_ms
             FROM sample s JOIN sys_sample y USING (sample_id) WHERE s.proc_dt_ms IS NOT NULL ORDER BY s.sample_id DESC LIMIT 1
             """) { r in
             sampleId = r.int(0); procDt = max(Double(r.int(1)), 1)
-            let own = (try? database.scalarInt("SELECT COUNT(*) FROM process WHERE exited_ts IS NULL AND source = 0")) ?? 0
-            line("processes", "\(r.int(2)) running (\(own) readable without root), \(r.int(3)) threads in readable ones")
-            line("contention", "\(fmt(Double(r.int(4)) / procDt, 2)) cores' worth of threads waiting"
-                 + (r.isNull(5) ? "" : ", \(pct(Double(r.int(5)), procDt)) of a core not attributed to readable processes"))
+            line("processes", "\(r.int(2)) running, \(r.int(3)) threads in natively readable ones")
+            line("contention", "\(fmt(Double(r.int(4)) / procDt, 2)) cores' worth of threads waiting")
         }
         guard let sampleId else { return }
+
+        // Coverage: how each process is measured, and how fresh the foreign data is.
+        let native = try database.scalarInt("SELECT COUNT(*) FROM process WHERE exited_ts IS NULL AND source = 0") ?? 0
+        let foreign = try database.scalarInt("SELECT COUNT(*) FROM process WHERE exited_ts IS NULL AND source = 1") ?? 0
+        let mode = try database.scalarInt("SELECT value FROM event WHERE kind = 'foreign_source' ORDER BY event_id DESC LIMIT 1")
+        var foreignSample: Int64?, foreignDt = 1.0, foreignAge = ""
+        try database.query("""
+            SELECT s.sample_id, s.ts, CASE WHEN s.flags & 32 THEN s.proc_dt_ms ELSE s.foreign_dt_ms END,
+                   y.foreign_cpu_ms, y.unknown_cpu_ms
+            FROM sample s JOIN sys_sample y USING (sample_id)
+            WHERE y.foreign_cpu_ms IS NOT NULL ORDER BY s.sample_id DESC LIMIT 1
+            """) { r in
+            foreignSample = r.int(0); foreignDt = max(Double(r.int(2)), 1)
+            foreignAge = ", last reading \(fmt(Double(now - r.int(1)) / 1000, 0)) s ago"
+            line("system cpu", "\(pct(Double(r.int(3)), foreignDt)) of a core in other users' processes"
+                 + (r.isNull(4) ? "" : ", \(pct(Double(r.int(4)), foreignDt)) unexplained (kernel, short-lived processes)"))
+        }
+        let source = mode == 2 ? "ps (top stream unavailable)" : (mode == 1 ? "top stream" : "not measured yet")
+        line("coverage", "\(native) read natively, \(foreign) via \(source)\(foreignAge)")
 
         // The daemon's own cost over the last five minutes (its rows are always stored).
         try database.query("""
@@ -90,20 +107,30 @@ struct Status: ParsableCommand {
             """, [now - 300_000]) { r in
             guard !r.isNull(0) else { return }
             let level = (try? database.scalarInt("SELECT value FROM event WHERE kind = 'collector_backoff' ORDER BY event_id DESC LIMIT 1")) ?? nil
-            line("monitor", "\(fmt(r.double(0), 2)) % of a core, \(bytes(r.int(1))) (5-minute average)"
+            line("monitor", "\(fmt(r.double(0), 2)) % of a core, \(bytes(r.int(1))) (5-minute average, excluding its top child)"
                  + ((level ?? 0) > 0 ? ", self-limiter at level \(level!)" : ""))
         }
 
-        for (title, order) in [("top cpu", "(p.cpu_user_ms + p.cpu_sys_ms) DESC"), ("top memory", "p.footprint DESC")] {
+        // Busiest processes: natively read ones from the latest sweep, plus other users' processes
+        // from their latest reading, each normalised by the interval it covers.
+        for (title, order) in [("top cpu", "cpu_pct DESC"), ("top memory", "footprint DESC")] {
             var first = true
             try database.query("""
-                SELECT e.name, pr.pid, (p.cpu_user_ms + p.cpu_sys_ms) * 100.0 / ?, p.footprint
-                FROM proc_sample p JOIN process pr USING (proc_id) JOIN executable e USING (exe_id)
-                WHERE p.sample_id = ? ORDER BY \(order) LIMIT 5
-                """, [procDt, sampleId]) { r in
+                SELECT name, pid, cpu_pct, footprint, fidelity FROM (
+                  SELECT e.name name, pr.pid pid, (p.cpu_user_ms + p.cpu_sys_ms) * 100.0 / ? cpu_pct, p.footprint footprint, p.fidelity fidelity
+                  FROM proc_sample p JOIN process pr USING (proc_id) JOIN executable e USING (exe_id)
+                  WHERE p.sample_id = ? AND p.fidelity = 0
+                  UNION ALL
+                  SELECT e.name, pr.pid, (p.cpu_user_ms + p.cpu_sys_ms) * 100.0 / ?, p.footprint, p.fidelity
+                  FROM proc_sample p JOIN process pr USING (proc_id) JOIN executable e USING (exe_id)
+                  WHERE p.sample_id = ? AND p.fidelity > 0
+                ) ORDER BY \(order) LIMIT 6
+                """, [procDt, sampleId, foreignDt, foreignSample ?? -1]) { r in
                 let name = r.text(0).padding(toLength: 28, withPad: " ", startingAt: 0)
+                let cpu = r.isNull(2) ? "     –" : fmt(r.double(2), 1).leftPad(6)
+                let mem = r.isNull(3) ? "       –" : bytes(r.int(3)).leftPad(8)
                 let text = "\(name) pid \(String(r.int(1)).padding(toLength: 6, withPad: " ", startingAt: 0)) "
-                    + "\(fmt(r.double(2), 1).leftPad(6)) % cpu  \(bytes(r.int(3)).leftPad(8))"
+                    + "\(cpu) % cpu  \(mem)\(r.int(4) > 0 ? "  (system)" : "")"
                 line(first ? title : "", text)
                 first = false
             }

@@ -126,6 +126,8 @@ What each path yields:
 | Disk bytes | yes | **no** | no |
 | Identity, path, parent, coalition | yes | yes (native calls, not via `top`) | — |
 
+**As built (phase 3).** The stream requests `pid,time,mem,cmprs,pageins,csw,threads,idlew,instrs,cycles,faults`. A sample is complete when the next one starts or the stream has been quiet for 0.3 s. A top sample arrives between ticks, so the system and own-process totals are interpolated to the sample's two end times before the residual is computed; in a live run the unexplained residual was 0.4–2.4 % of a core and never negative. While `ps` is active it is the only CPU source for foreign processes, so CPU is never counted twice. Until app rows exist (phase 4) the residuals live on `sys_sample` (`foreign_cpu_ms`, `unknown_cpu_ms`, `unattributed_disk_bytes`) rather than as synthetic apps. Whole-second `TIME` for long-running processes is accepted as unbiased noise (±1 s per sample) instead of an extra `ps` call; pausing the child on idle is wired in phase 4 with the cadence policy.
+
 **Residual accounting closes the gaps.** For every interval the daemon computes *system total − sum over own processes* for CPU, disk bytes and energy-relevant counters, and stores it as rows for two synthetic apps:
 
 - `system.foreign` — the foreign processes collectively. Its CPU is then broken down per process from `top`/`ps`; its disk I/O cannot be, and is reported as "system processes, combined".
@@ -386,17 +388,22 @@ CREATE TABLE sample (               -- one row per collection tick
   sample_id INTEGER PRIMARY KEY,    -- monotonically increasing, time-ordered
   ts INTEGER NOT NULL, boot_id INTEGER NOT NULL,
   dt_ms INTEGER NOT NULL,           -- real elapsed time covered by the system deltas
-  proc_dt_ms INTEGER,               -- time covered by this tick's process and app rows (NULL on tier 1)
+  proc_dt_ms INTEGER,               -- time covered by this tick's natively read process rows (NULL on tier 1)
+  foreign_dt_ms INTEGER,            -- time covered by this tick's top-stream rows (NULL unless a new top sample arrived)
   tier INTEGER NOT NULL,            -- 1 system only, 2 system + processes
-  flags INTEGER NOT NULL DEFAULT 0  -- after_wake, degraded, helper_present, foreign_fresh, episode_open
-);                                  -- foreign_fresh: this tick carries a new top-stream reading
+  flags INTEGER NOT NULL DEFAULT 0  -- 1 after_wake, 2 degraded, 4 helper_present, 8 foreign_fresh,
+);                                  -- 16 episode_open, 32 foreign CPU from ps (covers proc_dt_ms)
 CREATE INDEX sample_ts ON sample(ts);
 
 CREATE TABLE sys_sample (
   sample_id INTEGER PRIMARY KEY REFERENCES sample,
   -- cpu, in ms of core time over the interval
   cpu_user_ms INTEGER, cpu_sys_ms INTEGER, cpu_idle_ms INTEGER,
-  p_busy_ms INTEGER, e_busy_ms INTEGER, runnable_wait_ms INTEGER, unattributed_cpu_ms INTEGER,
+  p_busy_ms INTEGER, e_busy_ms INTEGER, runnable_wait_ms INTEGER,
+  unattributed_cpu_ms INTEGER,      -- busy minus natively read processes, over proc_dt_ms
+  foreign_cpu_ms INTEGER,           -- measured CPU of other users' processes (top or ps)
+  unknown_cpu_ms INTEGER,           -- busy minus own minus foreign: kernel work, short-lived processes; signed
+  unattributed_disk_bytes INTEGER,  -- device bytes minus natively read processes' bytes; approximate
   load1 REAL, canary_late_ms REAL,
   -- memory gauges, bytes
   mem_free INTEGER, mem_active INTEGER, mem_inactive INTEGER, mem_wired INTEGER,
@@ -431,6 +438,7 @@ CREATE TABLE proc_sample (          -- selective: top-K and above-floor processe
   threads INTEGER,
   d_net_in INTEGER, d_net_out INTEGER, d_gpu_ms INTEGER,    -- NULL unless optional collectors on
   mem_compressed INTEGER,           -- top stream only
+                                    -- top rows: total CPU is in cpu_user_ms, cpu_sys_ms is 0 (top has no split)
   fidelity INTEGER NOT NULL DEFAULT 0,   -- 0 native, 1 top stream, 2 ps (CPU only)
   reason INTEGER NOT NULL,          -- bitmask: which selection rule kept this row
   PRIMARY KEY (sample_id, proc_id)  -- columns a path cannot supply are NULL, never 0

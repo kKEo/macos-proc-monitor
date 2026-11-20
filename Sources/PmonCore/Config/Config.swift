@@ -33,6 +33,10 @@ public struct Config: Codable, Equatable {
     public var processIntervalSeconds: Double = 10
     public var slowIntervalSeconds: Double = 60
     public var recordingCapMB: Int = 256
+    /// Interval of the `top` stream that covers other users' processes.
+    public var foreignIntervalSeconds: Double = 30
+    /// Set false to cover other users' processes with `ps` only.
+    public var topStreamEnabled = true
 
     public init() {}
 
@@ -43,6 +47,8 @@ public struct Config: Codable, Equatable {
         processIntervalSeconds = try c.decodeIfPresent(Double.self, forKey: .processIntervalSeconds) ?? d.processIntervalSeconds
         slowIntervalSeconds = try c.decodeIfPresent(Double.self, forKey: .slowIntervalSeconds) ?? d.slowIntervalSeconds
         recordingCapMB = try c.decodeIfPresent(Int.self, forKey: .recordingCapMB) ?? d.recordingCapMB
+        foreignIntervalSeconds = try c.decodeIfPresent(Double.self, forKey: .foreignIntervalSeconds) ?? d.foreignIntervalSeconds
+        topStreamEnabled = try c.decodeIfPresent(Bool.self, forKey: .topStreamEnabled) ?? d.topStreamEnabled
     }
 
     /// Load from `path`; a missing file yields the defaults, a malformed one is an error.
