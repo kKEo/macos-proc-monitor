@@ -54,7 +54,7 @@ Dependency direction: `Model` ← `Collect`, `Engine`, `Attribute`, `Score` ← 
 | 5 | Detect and blame — **implemented 2026-11-20**; calibration against a week of real use still pending | 5.1 – 5.6 | 4 | 1–2 weeks |
 | 6 | History and reports — **implemented 2026-11-20** | 6.1 – 6.6 | 5 | 1–2 weeks |
 | 7 | Optional collectors, unprivileged — **implemented 2026-11-20**; footprint capture and GPU blame verified by tests only | 7.1 – 7.5 | 5 | 3–5 days |
-| 8 | Optional root helper | 8.1 – 8.4 | 3, 7.1 | 3–5 days |
+| 8 | Optional root helper — **implemented 2026-11-20**, not yet run as root; exec tracing not built | 8.1 – 8.4 | 3, 7.1 | 3–5 days |
 | 9 | Polish | 9.1 – 9.4 | 6 | 1–2 days |
 
 Phases 0–5 are the minimum useful product. Phases 6 and 7 are independent of each other.

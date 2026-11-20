@@ -118,6 +118,8 @@ struct Status: ParsableCommand {
         let native = try database.scalarInt("SELECT COUNT(*) FROM process WHERE exited_ts IS NULL AND source = 0") ?? 0
         let foreign = try database.scalarInt("SELECT COUNT(*) FROM process WHERE exited_ts IS NULL AND source = 1") ?? 0
         let mode = try database.scalarInt("SELECT value FROM event WHERE kind = 'foreign_source' ORDER BY event_id DESC LIMIT 1")
+        let helped = try database.scalarInt("SELECT COUNT(*) FROM process WHERE exited_ts IS NULL AND source = 2") ?? 0
+        line("root helper", helperSummary() + (helped > 0 ? "; \(helped) system processes read through it" : ""))
         var foreignDt = 1.0, foreignAge = ""
         try database.query("""
             SELECT s.sample_id, s.ts, CASE WHEN s.flags & 32 THEN s.proc_dt_ms ELSE s.foreign_dt_ms END,
@@ -200,4 +202,14 @@ struct Status: ParsableCommand {
 
 extension String {
     func leftPad(_ width: Int) -> String { count >= width ? self : String(repeating: " ", count: width - count) + self }
+}
+
+/// One line on the optional root helper: any process of the installing user may ask its version.
+func helperSummary(socket: String = (try? Config.load().helperSocket) ?? HelperPaths.socket) -> String {
+    let client = HelperClient(socketPath: socket)
+    guard client.connect() else {
+        return FileManager.default.fileExists(atPath: HelperPaths.plist) ? "installed but not answering" : "not installed (optional; `pmon helper` explains)"
+    }
+    defer { client.disconnect() }
+    return "running, version \(client.version ?? "?")" + (client.isRoot ? "" : " (not as root)")
 }

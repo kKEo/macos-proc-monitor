@@ -47,6 +47,8 @@ public struct Config: Codable, Equatable, Sendable {
     public var retention = RetentionPolicy()
     /// Optional collectors: modes and the capture budget.
     public var collectors = CollectorConfig()
+    /// Socket of the optional root helper. Used when present; never required.
+    public var helperSocket = HelperPaths.socket
 
     public init() {}
 
@@ -63,6 +65,7 @@ public struct Config: Codable, Equatable, Sendable {
         thresholds = try c.decodeIfPresent(Thresholds.self, forKey: .thresholds) ?? d.thresholds
         retention = try c.decodeIfPresent(RetentionPolicy.self, forKey: .retention) ?? d.retention
         collectors = try c.decodeIfPresent(CollectorConfig.self, forKey: .collectors) ?? d.collectors
+        helperSocket = try c.decodeIfPresent(String.self, forKey: .helperSocket) ?? d.helperSocket
     }
 
     /// Load from `path`; a missing file yields the defaults, a malformed one is an error.

@@ -63,6 +63,10 @@ public final class Pipeline {
     private var retentionBacklog = false
     private var needsVacuum = false
 
+    /// Processes read through the root helper on the current tick, and those already marked as such.
+    private var helperUids: Set<UInt64> = []
+    private var helperMarked: Set<UInt64> = []
+
     // Optional collectors.
     /// Cumulative GPU time per pid at the previous process sweep; nil when the collector was not running then.
     private var gpuPrev: [Int32: UInt64]?
@@ -116,7 +120,18 @@ public final class Pipeline {
         try db.transaction { try episodes.closeDangling() }
     }
 
-    public func ingest(_ rec: TickRecord) throws {
+    public func ingest(_ record: TickRecord) throws {
+        // Readings from the root helper are native counters: from here on those processes are
+        // treated exactly like the user's own, and are no longer "foreign".
+        var rec = record
+        helperUids = []
+        if var sweep = rec.procs, let helped = sweep.helper, !helped.isEmpty {
+            helperUids = Set(helped.map(\.uid))
+            sweep.procs += helped
+            sweep.foreign.removeAll { helperUids.contains($0.uid) }
+            sweep.helper = nil
+            rec.procs = sweep
+        }
         ticksIngested += 1
         if let slow = rec.slow { lastSlow = slow }
         try db.transaction {
@@ -164,6 +179,10 @@ public final class Pipeline {
                 for s in started { try writer.insertEvent(ts: tick.wallMs, kind: "proc_start", value: nil, detail: nil, appId: s.appId, procId: s.procId) }
                 for q in quit { try writer.insertEvent(ts: tick.wallMs, kind: "proc_exit", value: nil, detail: nil, appId: q.appId, procId: q.procId) }
             }
+            for uid in helperUids.subtracting(helperMarked).sorted() {
+                if let procId = procStore.procIds[uid] { try db.run("UPDATE process SET source = 2 WHERE proc_id = ?", [procId]) }
+            }
+            helperMarked = helperUids
             sweeps += 1
             if sweeps % 30 == 0 { try procStore.touchLive(ts: tick.wallMs) }
         }
@@ -254,7 +273,20 @@ public final class Pipeline {
         var topWindow: (start: UInt64, end: UInt64)?
         var psActive = false
         var flags: SampleFlags = backoffLevel > 0 ? .degraded : []
-        if let sweep = rec.procs {
+        // With the helper, every process is read natively: what is left over is kernel work and
+        // processes too short-lived to be seen, known for exactly this interval.
+        if let sweep = rec.procs, !helperUids.isEmpty {
+            flags.insert(.helperPresent)
+            topDeltas.reset(); psDeltas.reset(); lastTopMonoNs = nil       // stale by the time they are needed again
+            if sweep.foreign.isEmpty, let rest = totals?.unattributedCpuMs {
+                let helped = deltas.filter { helperUids.contains($0.uid) }.reduce(Int64(0)) { $0 + $1.cpuMs }
+                totals?.foreignCpuMs = helped
+                totals?.unknownCpuMs = rest
+                if let dt = procDtMs, dt > 0 { unknownCpuShare = Double(rest) / Double(dt) }
+                psActive = true                                            // the residual belongs to this tick
+            }
+            busyMsSinceSweep = 0; diskReadSinceSweep = 0; diskWriteSinceSweep = 0; busyCoversSweep = true
+        } else if let sweep = rec.procs {
             let uidByPid = Self.foreignMap(sweep)
             var rows: [UInt64: ForeignDelta] = [:]
 
@@ -398,7 +430,8 @@ public final class Pipeline {
             if let procId = procStore.procIds[d.uid] {
                 try db.query("SELECT e.name FROM process p JOIN executable e USING (exe_id) WHERE p.proc_id = ?", [procId]) { name = $0.text(0) }
             }
-            return CaptureTarget(pid: d.pid, name: name, cpuShare: Double(d.cpuMs) / Double(max(own.dtMs, 1)), footprint: d.footprint)
+            return CaptureTarget(pid: d.pid, name: name, cpuShare: Double(d.cpuMs) / Double(max(own.dtMs, 1)), footprint: d.footprint,
+                                 foreign: helperMarked.contains(d.uid))
         }
         let candidates = own.deltas.filter { $0.pid != own.selfPid }
         let cpu = candidates.filter { $0.cpuMs > 0 }.sorted { ($0.cpuMs, $1.uid) > ($1.cpuMs, $0.uid) }.prefix(5)

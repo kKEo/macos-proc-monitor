@@ -1,6 +1,6 @@
 # pmon — local macOS process activity monitor: design
 
-Status: phases 0–7 implemented (see PLAN.md); "as built" notes mark where the code differs from the design. Target: macOS 14+ on Apple Silicon (developed on macOS 26.2, MacBook Air, 4P+4E cores, 8 GB RAM).
+Status: phases 0–8 implemented (see PLAN.md); "as built" notes mark where the code differs from the design. Target: macOS 14+ on Apple Silicon (developed on macOS 26.2, MacBook Air, 4P+4E cores, 8 GB RAM).
 
 ## 1. Goal
 
@@ -150,6 +150,16 @@ So totals always reconcile, and blame can always land somewhere honest: either o
 | `top` child running | `top` child not needed |
 
 The helper holds no state and no database access: it takes a list of pids and returns raw counters, or runs one of a fixed set of capture commands. If it is missing, crashes or is uninstalled, `pmond` falls back to 4.1 within one interval.
+
+**As built (phase 8).** `pmon-helper` is a LaunchDaemon serving one Unix socket (`/var/run/dev.pmon.helper.sock`, mode 0600, owned by the installing user). The protocol is one JSON object per line: `hello`, `read` (a list of at most 8192 pids, answered with the same counter structure the native sweep produces) and `capture` (one of four fixed commands: `sample`, `footprint`, `spindump`, `powermetrics`; the client supplies at most a pid, never a path or flag). Capture output is compressed and returned over the socket, so the helper writes no files.
+
+*Who may call.* The peer's uid must be the installing user's (`getpeereid`), whatever the socket's file mode. `hello` is open to any process of that user, so `pmon status` can show the helper. `read` and `capture` additionally require the peer, identified by audit token, to have an intact code signature and to be the installed `pmond` executable; a signing requirement string can be added for a properly signed release. With an ad-hoc signed build the path check is the effective one, and since that path is writable by the same user, the boundary the helper really enforces is the user account, not the binary.
+
+*Integration.* Helper readings travel on the sweep (`ProcSweep.helper`) and the pipeline folds them into the natively read processes: same delta engine, same interval, fidelity 0, `process.source = 2`, sample flag 4. With every process read, the CPU remainder is exact for each tick and the disk residual shrinks to what the kernel itself did. While the helper answers, the `top` child is paused. If a read fails, the same sweep is covered by `ps`, `top` is resumed, and `ps` continues until `top` delivers; the top and ps baselines are dropped while the helper is in charge, so no delta can span the switch. A helper that answers but can read fewer than half of the other-user processes (not running as root) is ignored.
+
+*Captures.* With the helper connected, stack and memory captures also work on system-owned processes; `spindump` (episodes dominated by an unresponsive app) and `powermetrics` (thermal episodes) are two more collectors, off by default.
+
+*Not built:* exec tracing with `eslogger` (it also needs Full Disk Access for the helper; the short-lived process scan remains the stand-in). *Not verified:* nothing in this phase has run as root. The server, protocol, caller checks and fallback are tested with the same code running unprivileged; the root-only parts (reading other users' processes, `spindump`, `powermetrics`, the LaunchDaemon install) are untested until the helper is installed with `sudo pmon helper install`.
 
 **Pipeline stages**
 

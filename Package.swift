@@ -15,6 +15,7 @@ let package = Package(
         .target(name: "CPmonSys"),
         .target(name: "PmonCore", dependencies: ["CPmonSys"], linkerSettings: [.linkedLibrary("sqlite3")]),
         .executableTarget(name: "pmond", dependencies: ["PmonCore"]),
+        .executableTarget(name: "pmon-helper", dependencies: ["PmonCore"]),
         .executableTarget(
             name: "pmon",
             dependencies: ["PmonCore", .product(name: "ArgumentParser", package: "swift-argument-parser")]),

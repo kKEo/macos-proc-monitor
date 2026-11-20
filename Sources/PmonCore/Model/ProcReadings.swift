@@ -66,6 +66,9 @@ public struct ProcSweep: Codable, Equatable, Sendable {
     public var foreign: [ProcRef] = []
     /// Identities of process instances not reported in the previous sweep.
     public var identities: [ProcIdentity] = []
+    /// Counters of other users' processes, read through the root helper when it is installed.
+    /// Each one also still appears in `foreign`.
+    public var helper: [ProcReading]?
     /// How long the sweep took: input to the self-limiter.
     public var durationNs: UInt64 = 0
     public init() {}

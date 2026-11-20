@@ -18,6 +18,14 @@ public final class LiveCollectors {
     private let captures: CaptureManager?
     private let scanner: ShortLivedScanner?
     private let diskProbe: DiskProbe?
+    private let helper: HelperClient?
+    private var psUntilTop = false
+
+    /// True while the root helper is answering: the top stream is then not needed.
+    public private(set) var helperActive = false
+    /// A helper that answers but cannot read most other-user processes (it is not running as
+    /// root) is of no use: below this share of them, the unprivileged sources stay in charge.
+    public var helperMinCoverage = 0.5
 
     /// Ask for `ps` on every process sweep, for finer CPU resolution of foreign processes
     /// than the top stream gives. Used while a slowdown is being investigated.
@@ -32,7 +40,8 @@ public final class LiveCollectors {
     ///   - diskProbe: where the latency probe keeps its scratch file.
     public init(topStream: TopStream? = nil, session: SessionCollector? = nil, diagReports: DiagReportWatcher? = nil,
                 collectors: CollectorConfig = CollectorConfig(), captures: CaptureManager? = nil, scanner: ShortLivedScanner? = nil,
-                diskProbe: DiskProbe? = nil) {
+                diskProbe: DiskProbe? = nil, helper: HelperClient? = nil) {
+        self.helper = helper
         self.topStream = topStream
         self.session = session
         self.diagReports = diagReports
@@ -60,11 +69,34 @@ public final class LiveCollectors {
             let sweep = processes.collect()
             rec.procs = sweep; rec.selfPid = selfPid
             let foreignPids = Set(sweep.foreign.map(\.pid))
-            if let sample = topStream?.take() {
-                rec.top = TopSample(monoNs: sample.monoNs, rows: sample.rows.filter { foreignPids.contains($0.pid) })
+            // Root helper, when installed: native counters for other users' processes. If it stops
+            // answering, this same sweep falls back to ps, and ps carries on until top delivers again.
+            let was = helperActive
+            helperActive = false
+            if let helper, helper.connected || tick.tiers.contains(.slow) && helper.connect(),
+               let readings = helper.read(pids: sweep.foreign.map(\.pid)) {
+                let wanted = Dictionary(sweep.foreign.map { ($0.uid, $0.pid) }, uniquingKeysWith: { a, _ in a })
+                let usable = readings.filter { wanted[$0.uid] == $0.pid }              // a reused pid is a different process
+                if Double(usable.count) >= helperMinCoverage * Double(sweep.foreign.count) {
+                    rec.procs?.helper = usable
+                    helperActive = true
+                }
             }
-            if psBurst || topStream == nil || topStream!.needsFallback {
-                rec.ps = ps.collect(pids: sweep.foreign.map(\.pid))
+            if was != helperActive {
+                psUntilTop = !helperActive
+                notes.append(CollectorNote(kind: "foreign_source", value: helperActive ? 3 : 1,
+                                           detail: helperActive ? #"{"mode":"helper"}"# : #"{"mode":"top","reason":"root helper stopped answering"}"#))
+            }
+            if !helperActive {
+                if let sample = topStream?.take() {
+                    rec.top = TopSample(monoNs: sample.monoNs, rows: sample.rows.filter { foreignPids.contains($0.pid) })
+                    psUntilTop = false
+                }
+                if psBurst || psUntilTop || topStream == nil || topStream!.needsFallback {
+                    rec.ps = ps.collect(pids: sweep.foreign.map(\.pid))
+                }
+            } else {
+                _ = topStream?.take()          // a sample from before the helper took over is stale
             }
             notes += topStream?.takeNotes() ?? []
             if topStream == nil, !announcedPsOnly {

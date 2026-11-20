@@ -32,6 +32,10 @@ public struct CollectorConfig: Codable, Equatable, Sendable {
     public var diskProbe = CollectorMode.off
     /// Include command-line arguments in the `threads` capture. They can contain secrets.
     public var args = CollectorMode.off
+    /// System-wide stacks when an app stops responding. Needs the root helper.
+    public var spindump = CollectorMode.off
+    /// CPU, GPU and thermal power figures in a thermal slowdown. Needs the root helper.
+    public var powermetrics = CollectorMode.off
 
     /// Budget shared by all triggered captures.
     public var maxCaptureSetsPerHour = 6
@@ -41,7 +45,7 @@ public struct CollectorConfig: Codable, Equatable, Sendable {
     /// Share of one core that must go unattributed before a short-lived process scan starts.
     public var shortLivedCpuShare = 0.25
 
-    public static let names = ["stack", "threads", "footprint", "shortLived", "gpu", "gpuProcess", "network", "diskProbe", "args"]
+    public static let names = ["stack", "threads", "footprint", "shortLived", "gpu", "gpuProcess", "network", "diskProbe", "args", "spindump", "powermetrics"]
 
     public init() {}
 
@@ -52,6 +56,7 @@ public struct CollectorConfig: Codable, Equatable, Sendable {
         stack = try mode(.stack, stack); threads = try mode(.threads, threads); footprint = try mode(.footprint, footprint)
         shortLived = try mode(.shortLived, shortLived); gpu = try mode(.gpu, gpu); gpuProcess = try mode(.gpuProcess, gpuProcess)
         network = try mode(.network, network); diskProbe = try mode(.diskProbe, diskProbe); args = try mode(.args, args)
+        spindump = try mode(.spindump, spindump); powermetrics = try mode(.powermetrics, powermetrics)
         maxCaptureSetsPerHour = try c.decodeIfPresent(Int.self, forKey: .maxCaptureSetsPerHour) ?? maxCaptureSetsPerHour
         minBatteryPct = try c.decodeIfPresent(Int.self, forKey: .minBatteryPct) ?? minBatteryPct
         captureCapMB = try c.decodeIfPresent(Int.self, forKey: .captureCapMB) ?? captureCapMB
@@ -70,6 +75,8 @@ public struct CollectorConfig: Codable, Equatable, Sendable {
             case "network": return network
             case "diskProbe": return diskProbe
             case "args": return args
+            case "spindump": return spindump
+            case "powermetrics": return powermetrics
             default: return nil
             }
         }
@@ -85,6 +92,8 @@ public struct CollectorConfig: Codable, Equatable, Sendable {
             case "network": network = v
             case "diskProbe": diskProbe = v
             case "args": args = v
+            case "spindump": spindump = v
+            case "powermetrics": powermetrics = v
             default: break
             }
         }
@@ -125,8 +134,10 @@ public struct CaptureTarget: Equatable, Sendable {
     /// CPU used over the last process interval, as a share of one core.
     public var cpuShare: Double
     public var footprint: Int64
-    public init(pid: Int32, name: String, cpuShare: Double, footprint: Int64) {
-        self.pid = pid; self.name = name; self.cpuShare = cpuShare; self.footprint = footprint
+    /// Owned by another user: only the root helper can look inside it.
+    public var foreign: Bool
+    public init(pid: Int32, name: String, cpuShare: Double, footprint: Int64, foreign: Bool = false) {
+        self.pid = pid; self.name = name; self.cpuShare = cpuShare; self.footprint = footprint; self.foreign = foreign
     }
 }
 
@@ -153,16 +164,17 @@ public final class CaptureManager {
     private let queue = DispatchQueue(label: "pmon.capture", qos: .utility)
     private let lock = NSLock()
     private var results: [CaptureResult] = []
+    private let helper: HelperClient?
 
-    public init(dir: String, config: CollectorConfig) {
-        self.dir = dir; self.config = config
+    public init(dir: String, config: CollectorConfig, helper: HelperClient? = nil) {
+        self.dir = dir; self.config = config; self.helper = helper
         budget = CaptureBudget(maxPerHour: config.maxCaptureSetsPerHour, minBatteryPct: config.minBatteryPct)
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
     }
 
     /// True when at least one capture kind is switched on.
     public var enabled: Bool {
-        [config.stack, config.threads, config.footprint, config.network].contains { $0 != .off }
+        [config.stack, config.threads, config.footprint, config.network, config.spindump, config.powermetrics].contains { $0 != .off }
     }
 
     public func take() -> [CaptureResult] {
@@ -183,17 +195,29 @@ public final class CaptureManager {
         func on(_ m: CollectorMode) -> Bool { m == .always || (m == .triggered && within) }
         let stamp = "\(req.ts)-e\(req.episodeId)"
         queue.async { [self] in
+            // Another user's process can only be examined through the root helper.
+            let privileged = helper?.connected ?? false
+            func reachable(_ t: CaptureTarget) -> Bool { !t.foreign || privileged }
             // A stack is only worth taking from a process that is actually busy.
-            if on(config.stack), let t = req.cpuTop.first, t.cpuShare >= 0.2 {
-                add(captureStack(t, episode: req.episodeId, stamp: stamp))
+            if on(config.stack), let t = req.cpuTop.first(where: reachable), t.cpuShare >= 0.2 {
+                add(t.foreign ? captureViaHelper(.sample, target: t, kind: "stack", episode: req.episodeId, stamp: stamp)
+                              : captureStack(t, episode: req.episodeId, stamp: stamp))
             }
-            if on(config.threads), !req.cpuTop.isEmpty {
-                add(captureProcs(Array(req.cpuTop.prefix(5)), episode: req.episodeId, stamp: stamp))
+            let own = req.cpuTop.filter { !$0.foreign }
+            if on(config.threads), !own.isEmpty {
+                add(captureProcs(Array(own.prefix(5)), episode: req.episodeId, stamp: stamp))
             }
-            if on(config.footprint), req.dominant == "memory", let t = req.memTop.first {
-                add(captureFootprint(t, episode: req.episodeId, stamp: stamp))
+            if on(config.footprint), req.dominant == "memory", let t = req.memTop.first(where: reachable) {
+                add(t.foreign ? captureViaHelper(.footprint, target: t, kind: "footprint", episode: req.episodeId, stamp: stamp)
+                              : captureFootprint(t, episode: req.episodeId, stamp: stamp))
             }
             if on(config.network) { add(captureNetwork(episode: req.episodeId, stamp: stamp)) }
+            if privileged, on(config.spindump), req.dominant == "ui" {
+                add(captureViaHelper(.spindump, target: nil, kind: "spindump", episode: req.episodeId, stamp: stamp))
+            }
+            if privileged, on(config.powermetrics), req.dominant == "thermal" {
+                add(captureViaHelper(.powermetrics, target: nil, kind: "powermetrics", episode: req.episodeId, stamp: stamp))
+            }
         }
     }
 
@@ -226,6 +250,27 @@ public final class CaptureManager {
         chmod(path, 0o600)
         return CaptureResult(episodeId: episode, kind: kind, pid: pid, path: path, bytes: size, summary: summary,
                              costMs: Int((DispatchTime.now().uptimeNanoseconds - started) / 1_000_000))
+    }
+
+    /// A capture the root helper runs: its compressed output arrives over the socket and is
+    /// written here, so the helper itself never writes a file.
+    func captureViaHelper(_ what: HelperCapture, target: CaptureTarget?, kind: String, episode: Int64, stamp: String) -> CaptureResult? {
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        guard let data = helper?.capture(what, pid: target?.pid), !data.isEmpty else { return nil }
+        let path = "\(dir)/\(stamp)-\(kind)\(target.map { "-\($0.pid)" } ?? "").txt.gz"
+        guard FileManager.default.createFile(atPath: path, contents: data, attributes: [.posixPermissions: 0o600]) else { return nil }
+        let text = (try? Replayer.readText(path)) ?? ""
+        let summary: String
+        switch what {
+        case .sample:
+            let frames = CaptureSummary.hotFrames(sampleOutput: text)
+            summary = "\(target?.name ?? ""): " + (frames.isEmpty ? "no frames on a core" : frames.joined(separator: "; "))
+        case .footprint: summary = "\(target?.name ?? ""): " + CaptureSummary.footprintCategories(text).joined(separator: ", ")
+        case .spindump: summary = "system-wide stacks, \(text.split(separator: "\n").count) lines"
+        case .powermetrics: summary = CaptureSummary.powerLines(text).joined(separator: ", ")
+        }
+        return CaptureResult(episodeId: episode, kind: kind, pid: target?.pid, path: path, bytes: data.count, summary: summary,
+                             costMs: Int((DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000))
     }
 
     func captureStack(_ t: CaptureTarget, episode: Int64, stamp: String) -> CaptureResult? {
@@ -335,6 +380,13 @@ public enum CaptureSummary {
         let total = frames.reduce(0) { $0 + $1.count }
         guard total > 0 else { return [] }
         return frames.prefix(limit).map { "\($0.name) \($0.count * 100 / total) %" }
+    }
+
+    /// The headline power figures of `powermetrics` output.
+    public static func powerLines(_ text: String) -> [String] {
+        let wanted = ["CPU Power", "GPU Power", "Combined Power", "Current pressure level"]
+        return text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { line in wanted.contains { line.hasPrefix($0) } }.prefix(4).map { String($0) }
     }
 
     /// The largest dirty-memory categories in `footprint` output.

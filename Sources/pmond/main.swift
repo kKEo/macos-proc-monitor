@@ -57,11 +57,15 @@ do {
     let diagReports = DiagReportWatcher()
     diagReports.start()
     let captureDir = PmonPaths.captures(forDatabase: dbPath)
-    let captures = CaptureManager(dir: captureDir, config: config.collectors)
+    // The root helper is optional: used when its socket answers, ignored otherwise.
+    let helper = HelperClient(socketPath: config.helperSocket)
+    if helper.connect() { Log.info("root helper \(helper.version ?? "?") found at \(config.helperSocket)") }
+    let captures = CaptureManager(dir: captureDir, config: config.collectors, helper: helper)
     let scanner = ShortLivedScanner()
     let collectors = LiveCollectors(topStream: topStream, session: SessionCollector(), diagReports: diagReports,
                                     collectors: config.collectors, captures: captures, scanner: scanner,
-                                    diskProbe: DiskProbe(path: captureDir + "/probe.bin"))
+                                    diskProbe: DiskProbe(path: captureDir + "/probe.bin"), helper: helper)
+    var helperWasActive = false
     var lastBattery: Int?
     var lastScanMono: UInt64 = 0
     var lastExpiryMono: UInt64?
@@ -80,6 +84,12 @@ do {
             try recorder?.append(rec)
             try pipeline.ingest(rec)
             failures = 0
+            // The top child is not needed while the root helper answers; it resumes the moment it stops.
+            if collectors.helperActive != helperWasActive {
+                helperWasActive = collectors.helperActive
+                Log.info(helperWasActive ? "root helper active: top stream paused" : "root helper gone: back to the top stream")
+                if helperWasActive || cadence.pauseTop { topStream?.pause() } else { topStream?.resume() }
+            }
             // Optional collectors: captures for a newly opened episode, and a scan for short-lived
             // processes when CPU goes unattributed. Both run off this queue.
             if let pct = rec.slow?.batteryPct { lastBattery = pct }
@@ -107,7 +117,7 @@ do {
                 if rec.session != nil, wanted != cadence {
                     cadence = wanted
                     collectors.addNote(CollectorNote(kind: "cadence", value: Int64(cadence.level), detail: #"{"mode":"\#(cadence.name)"}"#))
-                    if cadence.pauseTop { topStream?.pause() } else { topStream?.resume() }
+                    if cadence.pauseTop || helperWasActive { topStream?.pause() } else { topStream?.resume() }
                 }
                 appliedBackoff = pipeline.backoffLevel
                 schedulerRef?.setIntervals(systemSeconds: cadence.systemSeconds,
