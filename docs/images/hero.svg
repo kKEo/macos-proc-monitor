@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 260" role="img" aria-label="pmon: which application made my Mac sluggish, when, and why?">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f172a"/><stop offset="1" stop-color="#1e1b4b"/>
+    </linearGradient>
+    <linearGradient id="line" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#a78bfa"/>
+    </linearGradient>
+    <linearGradient id="spike" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fb7185" stop-opacity=".55"/><stop offset="1" stop-color="#fb7185" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="glow"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+  <rect width="900" height="260" rx="18" fill="url(#bg)"/>
+  <g stroke="#334155" stroke-width="1" opacity=".6">
+    <path d="M40 70H860M40 120H860M40 170H860"/>
+  </g>
+  <!-- slowdown episode -->
+  <rect x="470" y="40" width="190" height="150" rx="6" fill="#fb7185" opacity=".10"/>
+  <path d="M40 160 L110 156 L170 162 L230 150 L290 158 L350 148 L410 155 L460 150 L490 90 L520 52 L555 48 L590 60 L630 120 L660 150 L720 156 L790 152 L860 158 L860 190 L40 190Z" fill="url(#spike)"/>
+  <path d="M40 160 L110 156 L170 162 L230 150 L290 158 L350 148 L410 155 L460 150 L490 90 L520 52 L555 48 L590 60 L630 120 L660 150 L720 156 L790 152 L860 158" fill="none" stroke="url(#line)" stroke-width="3" stroke-linejoin="round" filter="url(#glow)"/>
+  <circle cx="555" cy="48" r="6" fill="#fb7185" filter="url(#glow)"/>
+  <g font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" fill="#e2e8f0">
+    <text x="40" y="34" font-size="26" font-weight="700">pmon</text>
+    <text x="110" y="34" font-size="14" fill="#94a3b8">which app made my Mac sluggish, when, and why?</text>
+    <text x="565" y="36" font-size="12" fill="#fda4af">episode · 22:47–22:49</text>
+    <g transform="translate(600 62)">
+      <rect width="130" height="30" rx="15" fill="#0f172a" stroke="#fb7185"/>
+      <text x="65" y="20" font-size="13" text-anchor="middle" fill="#fecdd3">cmux · 93 %</text>
+    </g>
+    <text x="40" y="222" font-size="13" fill="#94a3b8">Sample</text>
+    <text x="130" y="222" font-size="13" fill="#94a3b8">→  Store  →  Detect  →  Blame  →  Explain</text>
+    <text x="860" y="222" font-size="13" text-anchor="end" fill="#7dd3fc">100 % local · no root · no network</text>
+  </g>
+  <rect x="40" y="236" width="820" height="3" rx="1.5" fill="url(#line)" opacity=".8"/>
+</svg>

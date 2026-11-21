@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 400" role="img" aria-label="Main strengths of pmon">
+  <defs>
+    <linearGradient id="c1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0ea5e9"/><stop offset="1" stop-color="#6366f1"/></linearGradient>
+    <linearGradient id="c2" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#10b981"/><stop offset="1" stop-color="#0ea5e9"/></linearGradient>
+    <linearGradient id="c3" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f43f5e"/><stop offset="1" stop-color="#f59e0b"/></linearGradient>
+    <linearGradient id="c4" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#a855f7"/><stop offset="1" stop-color="#ec4899"/></linearGradient>
+    <filter id="sh" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000" flood-opacity=".25"/></filter>
+  </defs>
+  <style>
+    .card{fill:#0f172a}
+    .t{font:700 19px -apple-system,Segoe UI,Helvetica,Arial,sans-serif;fill:#f1f5f9}
+    .d{font:14px -apple-system,Segoe UI,Helvetica,Arial,sans-serif;fill:#94a3b8}
+    .ic{fill:none;stroke:#fff;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
+  </style>
+  <!-- card 1: answers why -->
+  <g transform="translate(10 10)" filter="url(#sh)">
+    <rect class="card" width="425" height="180" rx="16"/>
+    <rect width="6" height="180" rx="3" fill="url(#c1)"/>
+    <circle cx="62" cy="62" r="30" fill="url(#c1)"/>
+    <g class="ic"><circle cx="58" cy="58" r="10"/><path d="M66 66l9 9"/></g>
+    <text class="t" x="112" y="56">Answers “why?”, not just “what”</text>
+    <text class="d" x="112" y="84">Detects slowdowns, ranks the culprits and</text>
+    <text class="d" x="112" y="104">states a confidence for every verdict.</text>
+    <text class="d" x="30" y="150" style="fill:#7dd3fc">pmon why --at 22:48</text>
+  </g>
+  <!-- card 2: private -->
+  <g transform="translate(465 10)" filter="url(#sh)">
+    <rect class="card" width="425" height="180" rx="16"/>
+    <rect width="6" height="180" rx="3" fill="url(#c2)"/>
+    <circle cx="62" cy="62" r="30" fill="url(#c2)"/>
+    <g class="ic"><rect x="49" y="60" width="26" height="18" rx="3"/><path d="M54 60v-6a8 8 0 0116 0v6"/></g>
+    <text class="t" x="112" y="56">Private by construction</text>
+    <text class="d" x="112" y="84">SQLite on your disk. Nothing leaves the</text>
+    <text class="d" x="112" y="104">machine, nothing listens on a port.</text>
+    <text class="d" x="30" y="150" style="fill:#6ee7b7">0 bytes sent · 0 open ports</text>
+  </g>
+  <!-- card 3: no root -->
+  <g transform="translate(10 210)" filter="url(#sh)">
+    <rect class="card" width="425" height="180" rx="16"/>
+    <rect width="6" height="180" rx="3" fill="url(#c3)"/>
+    <circle cx="62" cy="62" r="30" fill="url(#c3)"/>
+    <g class="ic"><path d="M62 46l16 6v10c0 10-7 16-16 20-9-4-16-10-16-20V52z"/><path d="M55 62l5 5 9-10"/></g>
+    <text class="t" x="112" y="56">No root needed</text>
+    <text class="d" x="112" y="84">Runs as your user. An optional helper adds</text>
+    <text class="d" x="112" y="104">exact data for system processes.</text>
+    <text class="d" x="30" y="150" style="fill:#fda4af">pmon install</text>
+  </g>
+  <!-- card 4: light -->
+  <g transform="translate(465 210)" filter="url(#sh)">
+    <rect class="card" width="425" height="180" rx="16"/>
+    <rect width="6" height="180" rx="3" fill="url(#c4)"/>
+    <circle cx="62" cy="62" r="30" fill="url(#c4)"/>
+    <g class="ic"><path d="M48 66h8l4-14 6 24 4-10h8"/></g>
+    <text class="t" x="112" y="56">Light on the machine</text>
+    <text class="d" x="112" y="84">A small daemon samples every few seconds,</text>
+    <text class="d" x="112" y="104">so it never becomes the slowdown.</text>
+    <text class="d" x="30" y="150" style="fill:#f0abfc">Small footprint · Apple Silicon</text>
+  </g>
+</svg>
