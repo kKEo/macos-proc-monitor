@@ -170,9 +170,17 @@ jobs:
         run: |
           cd dist
           shasum -a 256 "pmon-$VERSION.tar.gz" > "pmon-$VERSION.tar.gz.sha256"
+          assets=("pmon-$VERSION.tar.gz" "pmon-$VERSION.tar.gz.sha256")
+          # A release made by hand for this tag (e.g. on the GitHub page) keeps its title and notes;
+          # only the files are added, replacing any of the same name.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::release $TAG already exists; uploading the files to it"
+            gh release upload "$TAG" "${assets[@]}" --clobber
+            exit 0
+          fi
           flags=()
           [[ "$VERSION" == *-* ]] && flags+=(--prerelease)
-          gh release create "$TAG" "pmon-$VERSION.tar.gz" "pmon-$VERSION.tar.gz.sha256" \
+          gh release create "$TAG" "${assets[@]}" \
             --verify-tag --title "pmon $VERSION" --notes-file "$RUNNER_TEMP/notes.md" --generate-notes "${flags[@]}"
 
       - name: Remove the signing keychain
