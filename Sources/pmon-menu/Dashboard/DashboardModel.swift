@@ -50,6 +50,7 @@ final class DashboardModel: ObservableObject {
     @Published var episodeDetail: EpisodeDetail?
 
     @Published var findings: [Queries.Finding] = []
+    @Published var activeFindings = 0
     @Published var showClosedFindings = false { didSet { if showClosedFindings != oldValue { refresh() } } }
     @Published var selectedFinding: Int64? { didSet { if selectedFinding != oldValue { loadFindingSeries() } } }
     @Published var findingSeries: [AppPoint] = []
@@ -110,7 +111,8 @@ final class DashboardModel: ObservableObject {
     }
 
     func showFinding(_ id: Int64) {
-        if let f = findings.first(where: { $0.id == id }), f.status != "open" { showClosedFindings = true }
+        // Show resolved findings too unless this one is known to be active.
+        if findings.first(where: { $0.id == id })?.status != "open" { showClosedFindings = true }
         tab = .findings
         selectedFinding = id
     }
@@ -136,6 +138,7 @@ final class DashboardModel: ObservableObject {
                 let age = try await data.sampleAge()
                 sampleAge = age
                 noDatabase = false
+                activeFindings = try await data.activeFindingCount()
                 switch tab {
                 case .live:
                     live = try await data.live(minutes: minutes)
@@ -149,6 +152,7 @@ final class DashboardModel: ObservableObject {
                 case .findings:
                     findings = try await data.findings(includeClosed: closed)
                     if selectedFinding == nil || !findings.contains(where: { $0.id == selectedFinding }) { selectedFinding = findings.first?.id }
+                    else if !quiet || findingSeries.isEmpty { loadFindingSeries() }
                 case .apps:
                     apps = try await data.apps(range: range)
                     if selectedApp == nil { selectedApp = apps.first?.id } else if !quiet { loadApp() }

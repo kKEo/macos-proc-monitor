@@ -1,8 +1,9 @@
 import AppKit
 import PmonCore
 
-// pmon-menu — a menu-bar item showing the live sluggishness index and what is busy right now.
-// Read-only: it opens the database the daemon writes and runs `pmon` for the longer answers.
+// pmon-menu — a menu-bar item showing the live sluggishness index and what is busy right now,
+// and one dashboard window (live charts, history, slowdowns, findings, apps) that every menu entry opens.
+// Read-only: it opens the database the daemon writes, and runs `pmon` only for the HTML report.
 
 /// What the menu shows, read from the database in one go.
 struct Snapshot {
@@ -53,6 +54,7 @@ struct Snapshot {
     }
 }
 
+@MainActor
 final class MenuController: NSObject, NSMenuDelegate {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let dbPath: String
@@ -69,7 +71,7 @@ final class MenuController: NSObject, NSMenuDelegate {
         menu.delegate = self
         item.menu = menu
         refreshTitle()
-        timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.refreshTitle() }
+        timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.refreshTitle() } }
     }
 
     private static func clock(_ ms: Int64) -> String {
@@ -98,71 +100,56 @@ final class MenuController: NSObject, NSMenuDelegate {
         refreshTitle()
         menu.removeAllItems()
         func info(_ text: String) { menu.addItem(NSMenuItem(title: text, action: nil, keyEquivalent: "")) }
-        func action(_ text: String, _ selector: Selector) {
-            let m = NSMenuItem(title: text, action: selector, keyEquivalent: "")
+        func action(_ text: String, _ selector: Selector, key: String = "", tag: Int = 0) {
+            let m = NSMenuItem(title: text, action: selector, keyEquivalent: key)
             m.target = self
+            m.tag = tag
             menu.addItem(m)
         }
         guard let s = Snapshot.read(dbPath) else {
             info("No data yet. Start the daemon with `pmon install`.")
-            menu.addItem(.separator()); action("Quit pmon menu", #selector(quit))
+            menu.addItem(.separator()); action("Open dashboard…", #selector(openTab(_:)), key: "d", tag: 0)
+            menu.addItem(.separator()); action("Quit pmon menu", #selector(quit), key: "q")
             return
         }
         if stale {
             info("The daemon is not recording (last sample \(Int((s.sampleAgeSeconds ?? 0) / 60)) min ago)")
         } else {
             let parts = s.scores.prefix(3).map { "\($0.name) \($0.value)" }.joined(separator: ", ")
-            info("Sluggishness \(s.index ?? 0) of 100" + (parts.isEmpty ? "" : " (\(parts))"))
-            if let b = s.busiest { info("Busiest: \(b.name), \(String(format: "%.0f", b.cpuPct)) % of a core") }
-            if let e = s.openEpisode { info("Slow since \(Self.clock(e.start)): \(Snapshot.dimensionNames[e.dominant] ?? e.dominant)") }
+            action("Sluggishness \(s.index ?? 0) of 100" + (parts.isEmpty ? "" : " (\(parts))"), #selector(openLive))
+            if let b = s.busiest { action("Busiest: \(b.name), \(String(format: "%.0f", b.cpuPct)) % of a core", #selector(openLive)) }
+            if let e = s.openEpisode { action("Slow since \(Self.clock(e.start)): \(Snapshot.dimensionNames[e.dominant] ?? e.dominant)", #selector(explain)) }
         }
         if let e = s.lastEpisode {
             let minutes = max(1, Int((Double(e.end - e.start) / 60_000).rounded()))
-            info("Last slowdown: \(Self.clock(e.start)), \(minutes) min, \(Snapshot.dimensionNames[e.dominant] ?? e.dominant)"
-                 + (e.culprit.map { " — \($0)" } ?? ""))
+            action("Last slowdown: \(Self.clock(e.start)), \(minutes) min, \(Snapshot.dimensionNames[e.dominant] ?? e.dominant)"
+                   + (e.culprit.map { " — \($0)" } ?? ""), #selector(explain))
         } else {
             info("No slowdowns recorded")
         }
         menu.addItem(.separator())
-        action("Explain the latest slowdown…", #selector(explain))
-        action(s.findings == 0 ? "Findings: none" : "Findings: \(s.findings) active…", #selector(findings))
-        action("Open report (last 7 days)", #selector(report))
+        action("Open dashboard…", #selector(openTab(_:)), key: "d", tag: 0)
+        action("Live charts…", #selector(openTab(_:)), key: "l", tag: 1)
+        action("Explain the latest slowdown…", #selector(explain), key: "e")
+        action("Slowdowns…", #selector(openTab(_:)), tag: 2)
+        action(s.findings == 0 ? "Findings: none…" : "Findings: \(s.findings) active…", #selector(openTab(_:)), key: "f", tag: 3)
+        action("Applications…", #selector(openTab(_:)), tag: 4)
         menu.addItem(.separator())
-        action("Quit pmon menu", #selector(quit))
+        action("Open HTML report (last 7 days)", #selector(report))
+        menu.addItem(.separator())
+        action("Quit pmon menu", #selector(quit), key: "q")
     }
 
-    private func run(_ args: [String]) -> String {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: pmon)
-        p.arguments = args + ["--db", dbPath]
-        let pipe = Pipe()
-        p.standardOutput = pipe; p.standardError = pipe
-        do { try p.run() } catch { return "Could not run \(pmon): \(error.localizedDescription)" }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    private var dashboard: DashboardWindow { DashboardWindow.shared(dbPath: dbPath) }
+
+    @objc private func openTab(_ sender: NSMenuItem) {
+        dashboard.show([DashboardTab.overview, .live, .slowdowns, .findings, .apps][sender.tag])
     }
 
-    private func show(_ title: String, _ text: String) {
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = text.isEmpty ? "Nothing to show." : String(text.prefix(3000))
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
-    }
+    @objc private func openLive() { dashboard.show(.live) }
 
-    @objc private func explain() {
-        // Point `why` at the latest episode rather than at "now", which may be long after it.
-        var args = ["why"]
-        if let s = Snapshot.read(dbPath), s.openEpisode == nil, let e = s.lastEpisode {
-            let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH:mm"
-            args += ["--at", f.string(from: Date(timeIntervalSince1970: Double(e.start + (e.end - e.start) / 2) / 1000))]
-        }
-        show("Latest slowdown", run(args))
-    }
-
-    @objc private func findings() { show("Findings", run(["findings"])) }
+    /// The open slowdown if there is one, else the latest.
+    @objc private func explain() { dashboard.show(.slowdowns, latestEpisode: true) }
 
     @objc private func report() {
         let out = NSTemporaryDirectory() + "pmon-report.html"
@@ -170,7 +157,7 @@ final class MenuController: NSObject, NSMenuDelegate {
         p.executableURL = URL(fileURLWithPath: pmon)
         p.arguments = ["report", "--since", "7d", "--output", out, "--db", dbPath]
         p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
-        do { try p.run(); p.waitUntilExit() } catch { show("Report", "Could not run \(pmon)."); return }
+        do { try p.run(); p.waitUntilExit() } catch { dashboard.show(.overview); return }
         NSWorkspace.shared.open(URL(fileURLWithPath: out))
     }
 
@@ -178,10 +165,28 @@ final class MenuController: NSObject, NSMenuDelegate {
 }
 
 var dbPath = PmonPaths.database
-var args = CommandLine.arguments.dropFirst().makeIterator()
-while let a = args.next() {
+var openAtLaunch: DashboardTab?
+enum Selection { case episode(Int64), finding(Int64), app(String) }
+var selectAtLaunch: Selection?
+var args = Array(CommandLine.arguments.dropFirst())
+while !args.isEmpty {
+    let a = args.removeFirst()
     switch a {
-    case "--db": if let v = args.next() { dbPath = v }
+    case "--db": if !args.isEmpty { dbPath = args.removeFirst() }
+    case "--dashboard":
+        // Open the window at launch, optionally on a tab: overview, live, slowdowns, findings, apps.
+        // Also accepts episode:<id>, finding:<id> or app:<name> to open with that item selected.
+        openAtLaunch = .overview
+        if let next = args.first, !next.hasPrefix("--") {
+            let parts = next.split(separator: ":", maxSplits: 1).map(String.init)
+            switch (parts[0], parts.count > 1 ? parts[1] : nil) {
+            case ("episode", let v?): openAtLaunch = .slowdowns; selectAtLaunch = .episode(Int64(v) ?? 0)
+            case ("finding", let v?): openAtLaunch = .findings; selectAtLaunch = .finding(Int64(v) ?? 0)
+            case ("app", let v?): openAtLaunch = .apps; selectAtLaunch = .app(v)
+            default: openAtLaunch = DashboardTab(rawValue: next) ?? .overview
+            }
+            args.removeFirst()
+        }
     case "--snapshot":
         // For checking without a display: print what the menu would show and exit.
         if let s = Snapshot.read(dbPath) {
@@ -190,13 +195,30 @@ while let a = args.next() {
             print("last \(s.lastEpisode.map { "\($0.dominant) \($0.culprit ?? "-")" } ?? "-")")
         } else { print("no database at \(dbPath)") }
         exit(0)
+    case let a where a.hasPrefix("-Apple") || a.hasPrefix("-NS"):
+        // System defaults given on the command line, e.g. -AppleInterfaceStyle Dark; AppKit reads them itself.
+        if !args.isEmpty { args.removeFirst() }
     default:
-        print("usage: pmon-menu [--db <path>] [--snapshot]")
+        print("usage: pmon-menu [--db <path>] [--snapshot] [--dashboard [overview|live|slowdowns|findings|apps|episode:<id>|finding:<id>|app:<name>]]")
         exit(2)
     }
 }
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)          // no Dock icon, no main menu
-let controller = MenuController(dbPath: dbPath)
+// Top-level code runs on the main thread.
+let controller = MainActor.assumeIsolated { MenuController(dbPath: dbPath) }
+if let tab = openAtLaunch {
+    DispatchQueue.main.async {
+        MainActor.assumeIsolated {
+            let w = DashboardWindow.shared(dbPath: dbPath)
+            switch selectAtLaunch {
+            case .episode(let id): w.show(.slowdowns, episode: id)
+            case .finding(let id): w.show(.findings, finding: id)
+            case .app(let name): w.show(.apps); w.model.showApp(named: name)
+            case nil: w.show(tab)
+            }
+        }
+    }
+}
 app.run()

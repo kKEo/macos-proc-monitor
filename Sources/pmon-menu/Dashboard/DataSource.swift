@@ -17,7 +17,7 @@ struct LivePoint: Identifiable, Sendable {
     var index: Int?
     var scores: [String: Int]
     var cpuPct: Double?, pPct: Double?, ePct: Double?
-    var memLevelPct: Double?, compressedGB: Double?, swapGB: Double?
+    var memLevelPct: Double?, compressedGB: Double?, compressorGB: Double?, swapGB: Double?
     var diskReadMBs: Double?, diskWriteMBs: Double?
     var netInMBs: Double?, netOutMBs: Double?
     var gpuPct: Double?
@@ -144,7 +144,7 @@ actor DashboardData {
     private static let liveColumns = """
         s.sample_id, s.ts, s.dt_ms, y.slug_index, y.s_cpu, y.s_mem, y.s_disk, y.s_thermal, y.s_gpu, y.s_ui,
         y.cpu_user_ms, y.cpu_sys_ms, y.cpu_idle_ms, y.p_busy_ms, y.e_busy_ms,
-        y.mem_level_pct, y.mem_compressed, y.swap_used, y.d_disk_read, y.d_disk_write, y.d_net_in, y.d_net_out, y.gpu_util_pct, s.flags
+        y.mem_level_pct, y.mem_compressed, y.swap_used, y.d_disk_read, y.d_disk_write, y.d_net_in, y.d_net_out, y.gpu_util_pct, s.flags, y.compressor_size
         """
 
     private func livePoint(_ r: Statement) -> LivePoint {
@@ -159,7 +159,7 @@ actor DashboardData {
             cpuPct: r.isNull(10) || total <= 0 ? nil : busy / total * 100,
             pPct: opt(13).map { min(100, $0 / (dt * 1000 * cores.p) * 100) },
             ePct: opt(14).map { min(100, $0 / (dt * 1000 * cores.e) * 100) },
-            memLevelPct: opt(15), compressedGB: opt(16).map { $0 / gb }, swapGB: opt(17).map { $0 / gb },
+            memLevelPct: opt(15), compressedGB: opt(16).map { $0 / gb }, compressorGB: opt(24).map { $0 / gb }, swapGB: opt(17).map { $0 / gb },
             diskReadMBs: opt(18).map { $0 / mb / dt }, diskWriteMBs: opt(19).map { $0 / mb / dt },
             netInMBs: opt(20).map { $0 / mb / dt }, netOutMBs: opt(21).map { $0 / mb / dt },
             gpuPct: opt(22), episodeOpen: r.int(23) & 16 != 0)
@@ -259,6 +259,10 @@ actor DashboardData {
     }
 
     // MARK: Findings
+
+    func activeFindingCount() throws -> Int {
+        Int(try open().scalarInt("SELECT COUNT(*) FROM finding WHERE status = 'open'") ?? 0)
+    }
 
     func findings(includeClosed: Bool) throws -> [Queries.Finding] {
         try Queries.findings(try open(), includeClosed: includeClosed)

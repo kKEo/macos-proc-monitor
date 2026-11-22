@@ -222,10 +222,16 @@ struct StatTile: View {
             Text(label).font(.callout)
             if let note { Text(note).font(.caption).foregroundStyle(.secondary) }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding(14)
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
     }
+}
+
+/// A row of stat tiles, all as tall as the tallest.
+struct TileRow<Content: View>: View {
+    @ViewBuilder var content: Content
+    var body: some View { HStack(alignment: .top, spacing: 14) { content }.fixedSize(horizontal: false, vertical: true) }
 }
 
 /// A titled block on a dashboard page.
