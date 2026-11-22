@@ -2,29 +2,8 @@ import ArgumentParser
 import Foundation
 import PmonCore
 
-/// Shared formatting for the explanation commands.
-enum Fmt {
-    static func num(_ v: Double, _ digits: Int = 0) -> String { String(format: "%.\(digits)f", v) }
-    static func size(mb: Double) -> String { mb >= 1024 ? num(mb / 1024, 1) + " GB" : num(mb) + " MB" }
-    static func duration(_ ms: Int64) -> String {
-        let s = Double(ms) / 1000
-        if s < 90 { return num(s) + " s" }
-        if s < 5400 { return num(s / 60, s < 600 ? 1 : 0) + " min" }
-        return num(s / 3600, 1) + " h"
-    }
-    static func clock(_ ms: Int64, seconds: Bool = false) -> String {
-        let f = DateFormatter()
-        f.dateFormat = seconds ? "HH:mm:ss" : "HH:mm"
-        return f.string(from: Date(timeIntervalSince1970: Double(ms) / 1000))
-    }
-    static func day(_ ms: Int64) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "EEE d MMM"
-        return f.string(from: Date(timeIntervalSince1970: Double(ms) / 1000))
-    }
-    static let dimensionNames = ["cpu": "CPU contention", "memory": "memory pressure", "disk": "disk I/O saturation",
-                                 "thermal": "thermal throttling", "gpu": "GPU saturation", "ui": "an unresponsive app"]
-
+/// Parsing of command-line durations and times.
+extension Fmt {
     /// "2h", "90m", "3d", "45s" -> milliseconds.
     static func span(_ text: String) throws -> Int64 {
         guard let unit = text.last, let n = Double(text.dropLast()) else { throw ValidationError("expected a duration such as 30m, 6h or 7d") }
@@ -51,70 +30,6 @@ enum Fmt {
             if let today = cal.date(from: parts) { return Int64(today.timeIntervalSince1970 * 1000) }
         }
         throw ValidationError("expected a time such as 14:32 or \"2026-11-20 14:32\"")
-    }
-}
-
-struct Episode {
-    var id: Int64, start: Int64, end: Int64?
-    var peak: Int, mean: Int, dominant: String
-    var userPresent: Bool, focusApp: String?, onBattery: Bool, lowPower: Bool, afterWake: Bool
-    var means: [String: Int]
-
-    static let columns = """
-        e.episode_id, e.start_ts, e.end_ts, e.peak_index, e.mean_index, e.dominant, e.user_present,
-        (SELECT name FROM app a WHERE a.app_id = e.focus_app_id), e.on_battery, e.low_power, e.after_wake,
-        e.m_cpu, e.m_mem, e.m_disk, e.m_thermal, e.m_gpu, e.m_ui
-        """
-
-    init(_ r: Statement) {
-        id = r.int(0); start = r.int(1); end = r.optInt(2)
-        peak = Int(r.int(3)); mean = Int(r.int(4)); dominant = r.optText(5) ?? "cpu"
-        userPresent = r.int(6) == 1; focusApp = r.optText(7)
-        onBattery = r.int(8) == 1; lowPower = r.int(9) == 1; afterWake = r.int(10) == 1
-        means = ["cpu": Int(r.int(11)), "memory": Int(r.int(12)), "disk": Int(r.int(13)), "thermal": Int(r.int(14)), "gpu": Int(r.int(15)), "ui": Int(r.int(16))]
-    }
-}
-
-struct Blame {
-    var app: String, kind: String, dim: String, share: Double, score: Double, role: String, confidence: Int
-    var topProcess: String?, detail: [String: Double]
-}
-
-func loadBlame(_ db: Database, episode: Int64) throws -> [Blame] {
-    var rows: [Blame] = []
-    try db.query("""
-        SELECT a.name, a.kind, b.dim, b.share, b.score, b.role, b.confidence,
-               (SELECT e.name FROM process p JOIN executable e USING (exe_id) WHERE p.proc_id = b.top_proc_id), b.detail
-        FROM episode_blame b JOIN app a USING (app_id) WHERE b.episode_id = ? ORDER BY b.score DESC, b.share DESC
-        """, [episode]) { r in
-        let detail = (r.optText(8).flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) } as? [String: Double]) ?? [:]
-        rows.append(Blame(app: r.text(0), kind: r.text(1), dim: r.text(2), share: r.double(3), score: r.double(4), role: r.text(5),
-                          confidence: Int(r.int(6)), topProcess: r.optText(7), detail: detail))
-    }
-    return rows
-}
-
-/// What an app did, in words, for one dimension.
-func describe(_ b: Blame) -> String {
-    let d = b.detail
-    switch b.dim {
-    case "cpu":
-        if b.role == "victim" { return "spent \(Fmt.num(d["wait_s"] ?? 0)) s waiting for a core" }
-        if let n = d["short_lived_count"] {
-            let churn = "started short-lived processes that used the CPU (\(Fmt.num(n)) seen in a scan)"
-            return d["cpu_pct"] == nil ? churn : "used \(Fmt.num(d["cpu_pct"] ?? 0)) % of a core itself and \(churn)"
-        }
-        return "used \(Fmt.num(d["cpu_pct"] ?? 0)) % of a core (peak \(Fmt.num(d["peak_cpu_pct"] ?? 0)) %)"
-    case "memory":
-        if b.role == "victim" { return "had \(Fmt.num(d["pageins"] ?? 0)) page-ins while holding little memory itself" }
-        var parts = ["held \(Fmt.size(mb: d["held_mb"] ?? 0))"]
-        if let g = d["growth_mb"], g >= 20 { parts.append("grew by \(Fmt.size(mb: g)) in the 10 minutes before") }
-        return parts.joined(separator: " and ")
-    case "disk": return "read and wrote \(Fmt.size(mb: d["disk_mb"] ?? 0)) (\(Fmt.num(d["mb_per_s"] ?? 0)) MB/s)"
-    case "thermal": return "used \(Fmt.num(d["energy_mwh"] ?? 0, 1)) mWh in the minutes before and during"
-    case "gpu": return "used \(Fmt.num(d["gpu_pct"] ?? 0)) % of the GPU's time"
-    case "ui": return "was reported unresponsive by the system"
-    default: return ""
     }
 }
 
@@ -154,73 +69,9 @@ struct Why: ParsableCommand {
             }
             return
         }
-        print(Why.explain(e, try loadBlame(database, episode: e.id), now: now))
-        let evidence = try Why.evidence(database, e, now: now)
+        print(Explain.text(e, try loadBlame(database, episode: e.id), now: now))
+        let evidence = try Explain.evidence(database, e, now: now)
         if !evidence.isEmpty { print(evidence.joined(separator: "\n")) }
-    }
-
-    /// What the optional collectors found: short-lived processes and capture files.
-    static func evidence(_ db: Database, _ e: Episode, now: Int64) throws -> [String] {
-        var out: [String] = []
-        let end = e.end ?? now
-        try db.query("""
-            SELECT v.value, v.detail, a.name FROM event v LEFT JOIN app a USING (app_id)
-            WHERE v.kind = 'short_lived' AND v.value >= 10 AND v.ts > ? AND v.ts <= ? ORDER BY v.value DESC LIMIT 3
-            """, [e.start - 30_000, end + 120_000]) { r in
-            let d = (r.optText(1).flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) } as? [String: Any]) ?? [:]
-            let top = ((d["top"] as? [[String: Any]]) ?? []).prefix(3).map { "\($0["count"] ?? 0) x \($0["name"] ?? "?")" }
-            let process = (d["started_by"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-            let starter = [process, r.optText(2).map { process == nil || process == $0 ? $0 : "(\($0))" }].compactMap { $0 }.joined(separator: " ")
-
-            out.append("Short-lived processes: \(top.joined(separator: ", ")), started by \(starter.isEmpty ? "an unknown process" : starter).")
-        }
-        let labels = ["stack": "Call stacks", "procs": "Threads", "footprint": "Memory", "network": "Network"]
-        try db.query("SELECT kind, summary, path FROM capture WHERE episode_id = ? ORDER BY capture_id", [e.id]) { r in
-            let path = r.text(2)
-            let file = FileManager.default.fileExists(atPath: path) ? path : "file expired"
-            out.append("\(labels[r.text(0)] ?? r.text(0)): \(r.optText(1) ?? "")\n    \(file)")
-        }
-        return out.isEmpty ? [] : ["", "Evidence:"] + out.map { "  " + $0 }
-    }
-
-    /// The whole explanation as text.
-    static func explain(_ e: Episode, _ blame: [Blame], now: Int64) -> String {
-        var out: [String] = []
-        let end = e.end ?? now
-        let when = "\(Fmt.day(e.start)) \(Fmt.clock(e.start, seconds: end - e.start < 120_000))–\(Fmt.clock(end, seconds: end - e.start < 120_000))"
-        let state = e.end == nil ? "still going" : Fmt.duration(end - e.start)
-        out.append("\(when) (\(state)): \(Fmt.dimensionNames[e.dominant] ?? e.dominant), peak \(e.peak) of 100.")
-
-        let others = e.means.filter { $0.key != e.dominant && $0.value >= 30 }.sorted { $0.value > $1.value }
-        if !others.isEmpty { out.append("Also elevated: " + others.map { "\(Fmt.dimensionNames[$0.key] ?? $0.key) (\($0.value))" }.joined(separator: ", ") + ".") }
-
-        if e.end == nil {
-            out.append("Causes are worked out when the episode ends; `pmon status` shows what is busy right now.")
-        } else if blame.isEmpty {
-            out.append("No application stands out: the episode was too short to attribute, or its data has expired.")
-        } else {
-            let culprits = blame.filter { $0.role == "culprit" && $0.dim == e.dominant }
-            for (i, b) in culprits.prefix(3).enumerated() {
-                let via = b.topProcess.map { $0 == b.app ? "" : ", mostly \($0)" } ?? ""
-                let sure = b.confidence == 0 ? " (estimate: these processes cannot be told apart without the root helper)" : (b.confidence == 1 ? " (system-owned, coarser data)" : "")
-                out.append("\(i == 0 ? "Main cause" : "Also"): \(b.app) — \(Fmt.num(b.share * 100)) % of it; \(describe(b))\(via)\(sure).")
-            }
-            if culprits.isEmpty { out.append("No single application accounts for a meaningful share.") }
-            for b in blame.filter({ $0.role == "culprit" && $0.dim != e.dominant }).prefix(2) where b.score >= 0.1 {
-                out.append("Contributing through \(Fmt.dimensionNames[b.dim] ?? b.dim): \(b.app) — \(describe(b)).")
-            }
-            for b in blame.filter({ $0.role == "victim" }).prefix(2) {
-                out.append("Affected rather than responsible: \(b.app)\(b.app == e.focusApp ? " (in focus)" : "") — \(describe(b)).")
-            }
-        }
-
-        var context: [String] = []
-        if let f = e.focusApp { context.append("\(f) was in focus") }
-        context.append(e.userPresent ? "you were at the Mac" : "nobody was at the Mac")
-        if e.lowPower { context.append("Low Power Mode was on") } else if e.onBattery { context.append("on battery") }
-        if e.afterWake { context.append("it began right after waking from sleep") }
-        out.append("Context: " + context.joined(separator: "; ") + ".")
-        return out.joined(separator: "\n")
     }
 }
 
@@ -340,7 +191,7 @@ struct Calibrate: ParsableCommand {
         for e in episodes {
             let blame = try loadBlame(database, episode: e.id)
             print("")
-            print(Why.explain(e, blame, now: end))
+            print(Explain.text(e, blame, now: end))
             for b in blame.prefix(6) {
                 print("    \(b.dim.padding(toLength: 8, withPad: " ", startingAt: 0)) \(b.role.padding(toLength: 8, withPad: " ", startingAt: 0)) "
                       + "\(Fmt.num(b.share * 100).padding(toLength: 4, withPad: " ", startingAt: 0))%  score \(Fmt.num(b.score, 2))  \(b.app)")

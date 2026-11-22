@@ -161,7 +161,7 @@ struct ReportPage {
             let end = e.end ?? now
             let blame = try loadBlame(db, episode: e.id)
             let cause = blame.first { $0.role == "culprit" && $0.dim == e.dominant }
-            let causeText = e.end == nil ? "in progress" : (cause.map { "\($0.app) (\(Fmt.num($0.share * 100)) %): \(describe($0))" } ?? "no single application")
+            let causeText = e.end == nil ? "in progress" : (cause.map { "\($0.app) (\(Fmt.num($0.share * 100)) %): \(Explain.describe($0))" } ?? "no single application")
             let victim = blame.first { $0.role == "victim" }.map { "; affected: \($0.app)" } ?? ""
             var context: [String] = []
             if let f = e.focusApp { context.append("\(f) in focus") }
