@@ -3,9 +3,12 @@
 #
 #   Support/release.sh                       ad-hoc signature (runs on this Mac)
 #   SIGN_IDENTITY="Developer ID Application: …" Support/release.sh
+#   SIGN_IDENTITY=… APPLE_ID=… APPLE_TEAM_ID=… APPLE_APP_PASSWORD=… Support/release.sh
+#                                            … and notarise the binaries with Apple
 #
 # A Developer ID signature is what makes the root helper's caller check meaningful: install the
-# helper with a matching requirement (see DESIGN.md, phase 8). Notarisation is not done here.
+# helper with a matching requirement (see DESIGN.md, phase 8). Bare executables cannot be stapled;
+# Gatekeeper looks the notarisation ticket up online on first launch.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -35,6 +38,24 @@ for t in "${TOOLS[@]}"; do
     fi
     codesign --verify --strict "$STAGE/bin/$t"
 done
+
+if [ -n "${APPLE_ID:-}" ]; then
+    [ "$IDENTITY" != "-" ] || { echo "notarisation needs SIGN_IDENTITY (a Developer ID certificate)"; exit 1; }
+    echo "== notarise"
+    ditto -c -k --keepParent "$STAGE/bin" "dist/pmon-$VERSION-bin.zip"
+    AUTH=(--apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD")
+    RESULT="$(xcrun notarytool submit "dist/pmon-$VERSION-bin.zip" --wait --output-format json "${AUTH[@]}")"
+    # notarytool can exit 0 for a rejected submission: check the verdict itself.
+    STATUS="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("status", ""))' <<<"$RESULT")"
+    if [ "$STATUS" != "Accepted" ]; then
+        echo "notarisation failed: $STATUS"
+        SUBMISSION="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("id", ""))' <<<"$RESULT")"
+        [ -n "$SUBMISSION" ] && xcrun notarytool log "$SUBMISSION" "${AUTH[@]}" || true
+        exit 1
+    fi
+    echo "notarised: $STATUS"
+    rm -f "dist/pmon-$VERSION-bin.zip"
+fi
 
 cp README.md "$STAGE/"
 cp docs/*.md "$STAGE/docs/"

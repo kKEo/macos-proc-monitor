@@ -1,31 +1,153 @@
 name: Release
 
-# Push a tag like v0.1.0 to build, test and publish a release with the tarball attached.
+# Two ways to release:
+#   • Actions › Release › Run workflow, with a version such as 0.2.0: bumps PmonVersion on master,
+#     commits, tags v0.2.0, then builds, tests, signs, notarises and publishes the release.
+#   • Push a tag such as v0.2.0 yourself: the same build and publish, for a version already in the code.
+#
+# Signing and notarisation are optional and switch on when these repository secrets exist:
+#   MACOS_CERTIFICATE           base64 of a Developer ID Application certificate exported as .p12
+#   MACOS_CERTIFICATE_PASSWORD  the .p12 password
+#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD   an app-specific password, for notarisation
+# Without them the binaries are ad-hoc signed, as before.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, without the v (e.g. 0.2.0, or 0.2.0-rc.1 for a pre-release)"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
-  release:
-    runs-on: macos-15
-    timeout-minutes: 30
+  prepare:
+    name: Bump version and tag
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
 
-      - name: Build, test and package
-        run: Support/release.sh
+      - name: Check the version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::'$VERSION' is not a version such as 0.2.0 or 0.2.0-rc.1"; exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::tag v$VERSION already exists"; exit 1
+          fi
+
+      - name: Bump PmonVersion, commit and tag
+        id: tag
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          file=Sources/PmonCore/Config/Config.swift
+          sed -i -E "s/(public static let string = )\"[^\"]*\"/\1\"$VERSION\"/" "$file"
+          grep -q "public static let string = \"$VERSION\"" "$file" || { echo "::error::could not set the version in $file"; exit 1; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet; then
+            git commit -am "Release v$VERSION"
+          fi
+          git tag -a "v$VERSION" -m "pmon $VERSION"
+          git push origin HEAD:master "v$VERSION"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Build, sign and publish
+    needs: prepare
+    # Runs after `prepare` for a manual release, and on its own for a pushed tag.
+    if: always() && (needs.prepare.result == 'success' || (github.event_name == 'push' && needs.prepare.result == 'skipped'))
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      TAG: ${{ needs.prepare.outputs.tag || github.ref_name }}
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      - name: Toolchain
+        run: swift --version
+
+      - name: Import the signing certificate
+        if: env.MACOS_CERTIFICATE != ''
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password="$(uuidgen)"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          identity="$(security find-identity -v -p codesigning "$keychain" | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')"
+          [ -n "$identity" ] || { echo "::error::no Developer ID Application identity in MACOS_CERTIFICATE"; exit 1; }
+          echo "SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+          echo "Signing as $identity"
+
+      - name: Build, test, sign and package
+        run: |
+          # Notarisation needs every Apple secret; without them release.sh skips it.
+          if [ -z "$APPLE_ID" ] || [ -z "$APPLE_TEAM_ID" ] || [ -z "$APPLE_APP_PASSWORD" ] || [ -z "${SIGN_IDENTITY:-}" ]; then
+            unset APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD
+            echo "NOTARISED=0" >> "$GITHUB_ENV"
+          else
+            echo "NOTARISED=1" >> "$GITHUB_ENV"
+          fi
+          Support/release.sh
 
       - name: Check that the tag matches the built version
         run: |
           version="$(.build/release/pmon --version)"
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match the version in the code ($version); update PmonVersion in Sources/PmonCore/Config/Config.swift"
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::tag $TAG does not match the version in the code ($version); update PmonVersion in Sources/PmonCore/Config/Config.swift"
             exit 1
           fi
           echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Write the release notes
+        run: |
+          if [ "$NOTARISED" = 1 ]; then
+            trust="The binaries are signed with a Developer ID and notarised by Apple."
+          elif [ -n "${SIGN_IDENTITY:-}" ]; then
+            trust="The binaries are signed with a Developer ID but not notarised: after downloading, clear the quarantine flag with \`xattr -dr com.apple.quarantine pmon-$VERSION\`."
+          else
+            trust="The binaries are ad-hoc signed and not notarised: after downloading, clear the quarantine flag with \`xattr -dr com.apple.quarantine pmon-$VERSION\`, or build from source."
+          fi
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          ## Install
+
+          \`\`\`
+          tar -xzf pmon-$VERSION.tar.gz
+          cd pmon-$VERSION && ./install.sh
+          \`\`\`
+
+          $trust Check the download with \`shasum -a 256 -c pmon-$VERSION.tar.gz.sha256\`.
+          EOF
 
       - name: Publish
         env:
@@ -33,6 +155,11 @@ jobs:
         run: |
           cd dist
           shasum -a 256 "pmon-$VERSION.tar.gz" > "pmon-$VERSION.tar.gz.sha256"
-          gh release create "$GITHUB_REF_NAME" "pmon-$VERSION.tar.gz" "pmon-$VERSION.tar.gz.sha256" \
-            --title "pmon $VERSION" \
-            --notes "Unpack and run \`./install.sh\`. The binaries are ad-hoc signed and not notarised: after downloading, clear the quarantine flag with \`xattr -dr com.apple.quarantine pmon-$VERSION\`, or build from source."
+          flags=()
+          [[ "$VERSION" == *-* ]] && flags+=(--prerelease)
+          gh release create "$TAG" "pmon-$VERSION.tar.gz" "pmon-$VERSION.tar.gz.sha256" \
+            --verify-tag --title "pmon $VERSION" --notes-file "$RUNNER_TEMP/notes.md" --generate-notes "${flags[@]}"
+
+      - name: Remove the signing keychain
+        if: always() && env.MACOS_CERTIFICATE != ''
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
