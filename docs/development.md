@@ -16,7 +16,7 @@ Releases are made by `.github/workflows/release.yml`; nothing needs to run on a 
 2. The workflow sets `PmonVersion` in `Sources/PmonCore/Config/Config.swift`, commits `Release v0.2.0` to `master` and tags `v0.2.0`.
 3. It then builds, runs the tests, signs, notarises when it can, and publishes a GitHub release with the tarball, its SHA-256, install instructions and notes generated from the merged changes.
 
-Pushing a tag by hand (`git tag v0.2.0 && git push origin v0.2.0`) runs step 3 alone; the tag must match `PmonVersion`.
+Pushing a tag by hand (`git tag v0.2.0 && git push origin v0.2.0`) runs step 3 alone. The binaries then take their version from the tag; if `PmonVersion` in the code differs, the run warns and the code is not changed, so prefer the workflow.
 
 Signing and notarisation switch on when these repository secrets exist (Settings › Secrets and variables › Actions):
 

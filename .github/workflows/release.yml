@@ -3,7 +3,8 @@ name: Release
 # Two ways to release:
 #   • Actions › Release › Run workflow, with a version such as 0.2.0: bumps PmonVersion on master,
 #     commits, tags v0.2.0, then builds, tests, signs, notarises and publishes the release.
-#   • Push a tag such as v0.2.0 yourself: the same build and publish, for a version already in the code.
+#   • Push a tag such as v0.2.0 yourself: the same build and publish. The binaries take their version
+#     from the tag; when PmonVersion in the code differs, the run warns and the code is left as it is.
 #
 # Signing and notarisation are optional and switch on when these repository secrets exist:
 #   MACOS_CERTIFICATE           base64 of a Developer ID Application certificate exported as .p12
@@ -35,7 +36,7 @@ jobs:
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: master
           fetch-depth: 0
@@ -83,13 +84,27 @@ jobs:
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
           fetch-depth: 0
 
       - name: Toolchain
         run: swift --version
+
+      - name: Take the version from a pushed tag
+        if: github.event_name == 'push'
+        run: |
+          version="${TAG#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::tag $TAG is not a version such as v0.2.0 or v0.2.0-rc.1"; exit 1
+          fi
+          file=Sources/PmonCore/Config/Config.swift
+          code="$(sed -nE 's/.*public static let string = "([^"]*)".*/\1/p' "$file")"
+          if [ "$code" != "$version" ]; then
+            sed -i '' -E "s/(public static let string = )\"[^\"]*\"/\1\"$version\"/" "$file"
+            echo "::warning::PmonVersion in the code is $code; building $version from the tag. Run the Release workflow instead of pushing tags to keep the code in step."
+          fi
 
       - name: Import the signing certificate
         if: env.MACOS_CERTIFICATE != ''
