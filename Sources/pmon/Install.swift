@@ -95,7 +95,7 @@ struct Uninstall: ParsableCommand {
 
 struct MenuCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "menu", abstract: "The menu-bar item: live index, what is busy, shortcuts to explanations and the report.",
+        commandName: "menu", abstract: "The menu-bar item: live index, what is busy, and a dashboard window with live charts and history.",
         subcommands: [InstallSub.self, UninstallSub.self])
 
     static func install() throws {

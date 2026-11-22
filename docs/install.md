@@ -15,7 +15,7 @@ Optional extras:
 
 | Command | What it adds |
 |---|---|
-| `pmon menu install` | A menu-bar item: live index, the busiest app, shortcuts to the explanation and the report |
+| `pmon menu install` | A menu-bar item: live index, the busiest app, and a dashboard window with live charts, history, slowdowns, findings and apps |
 | `pmon config notifications on` | A notification when a slowdown lasts two minutes, and for new findings |
 | `pmon config set --recommended` | Deeper evidence during slowdowns: call stacks, threads, short-lived processes, GPU time per app |
 | `sudo pmon helper install` | Exact data for system-owned processes (see [The root helper](helper.md)) |
