@@ -1,7 +1,7 @@
 import Foundation
 
 public enum PmonVersion {
-    public static let string = "0.1.0"
+    public static let string = "0.2.2"
 }
 
 /// Well-known locations. Everything lives in the user's home directory; nothing needs root.
