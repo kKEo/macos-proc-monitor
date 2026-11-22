@@ -12,9 +12,18 @@ GitHub Actions runs the build and the tests on every push to `master` and every 
 
 Releases are made by `.github/workflows/release.yml`; nothing needs to run on a Mac.
 
-1. Run `make release VERSION=0.2.0` (`0.2.0-rc.1` makes a pre-release). It checks that `master` is pushed and the tag is new, starts the workflow and follows it to the end; `WATCH=0` returns at once, `DRY_RUN=1` only runs the checks. The same can be done in GitHub: **Actions › Release › Run workflow**.
+1. Run `make release` to release the next patch version, `make release BUMP=minor` (or `major`) for a bigger step, or `make release VERSION=0.2.0` for an exact one (`0.2.0-rc.1` makes a pre-release). It checks that `master` is pushed and the version is not tagged or released yet, asks for confirmation, starts the workflow and follows it to the end; `WATCH=0` returns at once, `DRY_RUN=1` only runs the checks, `YES=1` skips the question. The same can be done in GitHub: **Actions › Release › Run workflow**.
 2. The workflow sets `PmonVersion` in `Sources/PmonCore/Config/Config.swift`, commits `Release v0.2.0` to `master` and tags `v0.2.0`.
 3. It then builds, runs the tests, signs, notarises when it can, and publishes a GitHub release with the tarball, its SHA-256, install instructions and notes generated from the merged changes.
+
+`make` alone lists the targets. The other release targets:
+
+| Target | What it does |
+|---|---|
+| `make releases` | Every version tagged on GitHub, newest first, with its release date, or a note when the tag has no release |
+| `make last-release` | The latest release, and a newer pre-release if there is one |
+| `make next-version [BUMP=minor]` | The version `make release` would pick: the latest tag bumped by one step (a pre-release such as `0.3.0-rc.1` steps to `0.3.0`); the version in the code when nothing is tagged yet or when it is already ahead |
+| `make check VERSION=0.2.0` | Whether that version is free: not tagged on GitHub, not released, no stale local tag |
 
 Pushing a tag by hand (`git tag v0.2.0 && git push origin v0.2.0`) runs step 3 alone. The binaries then take their version from the tag; if `PmonVersion` in the code differs, the run warns and the code is not changed, so prefer the workflow.
 
