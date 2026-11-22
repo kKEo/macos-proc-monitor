@@ -12,7 +12,7 @@ GitHub Actions runs the build and the tests on every push to `master` and every 
 
 Releases are made by `.github/workflows/release.yml`; nothing needs to run on a Mac.
 
-1. In GitHub, open **Actions › Release › Run workflow** and enter the version, such as `0.2.0` (`0.2.0-rc.1` makes a pre-release).
+1. Run `make release VERSION=0.2.0` (`0.2.0-rc.1` makes a pre-release). It checks that `master` is pushed and the tag is new, starts the workflow and follows it to the end; `WATCH=0` returns at once, `DRY_RUN=1` only runs the checks. The same can be done in GitHub: **Actions › Release › Run workflow**.
 2. The workflow sets `PmonVersion` in `Sources/PmonCore/Config/Config.swift`, commits `Release v0.2.0` to `master` and tags `v0.2.0`.
 3. It then builds, runs the tests, signs, notarises when it can, and publishes a GitHub release with the tarball, its SHA-256, install instructions and notes generated from the merged changes.
 
