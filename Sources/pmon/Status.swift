@@ -31,7 +31,11 @@ struct Status: ParsableCommand {
            let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)), kill(pid, 0) == 0 {
             daemon = "running (pid \(pid))"
         }
-        line("daemon", "\(daemon), launchd agent \(agentLoaded() ? "loaded" : "not loaded")")
+        let labels = loadedDaemonLabels()
+        line("daemon", "\(daemon), launchd agent " + (labels.isEmpty ? "not loaded" : labels.joined(separator: " and ") + " loaded"))
+        if labels.count > 1 {
+            line("", "two LaunchAgents start the daemon and only one can run: keep Homebrew's with `pmon uninstall`, or ours with `brew services stop pmon`")
+        }
 
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         var found = false
@@ -97,7 +101,8 @@ struct Status: ParsableCommand {
         if let text = try? String(contentsOfFile: PmonPaths.lock(forDatabase: db), encoding: .utf8),
            let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)), kill(pid, 0) == 0 { daemonPid = Int(pid) }
         let open = try database.scalarInt("SELECT COUNT(*) FROM episode WHERE end_ts IS NULL") ?? 0
-        printJSON(["version": PmonVersion.string, "daemon_pid": daemonPid, "agent_loaded": agentLoaded(), "sample": sample,
+        let update: Any = UpdateState.load().available().map { ["version": $0.version, "url": $0.pageURL] } ?? NSNull()
+        printJSON(["version": PmonVersion.string, "update_available": update, "daemon_pid": daemonPid, "agent_loaded": agentLoaded(), "sample": sample,
                    "top_apps": apps, "episode_in_progress": open > 0])
     }
 
@@ -123,7 +128,11 @@ struct Status: ParsableCommand {
             daemonVersion = (r.optText(0).flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) } as? [String: Any])?["version"] as? String
         }
         if let v = daemonVersion, v != PmonVersion.string {
-            line("version", "the daemon is \(v), this pmon is \(PmonVersion.string): run `pmon install` to bring them in line")
+            line("version", "the daemon is \(v), this pmon is \(PmonVersion.string): run `"
+                 + (Installation.current.isHomebrew ? "brew services restart pmon" : "pmon install") + "` to bring them in line")
+        }
+        if let r = UpdateState.load().available() {
+            line("update", "pmon \(r.version) is available: run `\(Installation.current.upgradeCommand)`")
         }
         let helped = try database.scalarInt("SELECT COUNT(*) FROM process WHERE exited_ts IS NULL AND source = 2") ?? 0
         line("root helper", helperSummary() + (helped > 0 ? "; \(helped) system processes read through it" : ""))

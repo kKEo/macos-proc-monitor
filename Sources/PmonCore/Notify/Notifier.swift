@@ -3,7 +3,7 @@ import Foundation
 /// Something worth telling the user about. Produced by the pipeline; whether it is shown is
 /// decided by the daemon (`NoticeLimiter`).
 public struct Notice: Equatable, Sendable {
-    public enum Kind: String, Sendable { case longEpisode, finding }
+    public enum Kind: String, Sendable { case longEpisode, finding, update }
     public var kind: Kind
     public var title: String
     public var body: String
@@ -47,6 +47,7 @@ public struct NoticeLimiter: Sendable {
         switch notice.kind {
         case .longEpisode: guard config.longEpisodes else { return false }
         case .finding: guard config.findings else { return false }
+        case .update: break     // announced once per version by the update check, not rate-limited here
         }
         if let last = lastMs, Double(nowMs - last) < config.minGapMinutes * 60_000 { return false }
         lastMs = nowMs

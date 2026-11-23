@@ -53,6 +53,8 @@ public struct Config: Codable, Equatable, Sendable {
     /// Socket of the optional root helper. Used when present; never required.
     public var helperSocket = HelperPaths.socket
     public var notifications = NotifyConfig()
+    /// Checks for newer releases on GitHub.
+    public var updates = UpdateConfig()
 
     public init() {}
 
@@ -71,6 +73,7 @@ public struct Config: Codable, Equatable, Sendable {
         collectors = try c.decodeIfPresent(CollectorConfig.self, forKey: .collectors) ?? d.collectors
         helperSocket = try c.decodeIfPresent(String.self, forKey: .helperSocket) ?? d.helperSocket
         notifications = try c.decodeIfPresent(NotifyConfig.self, forKey: .notifications) ?? d.notifications
+        updates = try c.decodeIfPresent(UpdateConfig.self, forKey: .updates) ?? d.updates
     }
 
     /// Load from `path`; a missing file yields the defaults, a malformed one is an error.

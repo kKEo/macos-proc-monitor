@@ -9,7 +9,7 @@ struct Pmon: ParsableCommand {
         abstract: "Local macOS activity monitor: find what makes the machine sluggish.",
         version: PmonVersion.string,
         subcommands: [Status.self, Why.self, Episodes.self, Top.self, FindingsCommand.self, AppCommand.self, Report.self, Export.self,
-                      Mark.self, ConfigCommand.self, HelperCommand.self, MenuCommand.self, Install.self, Uninstall.self, Replay.self, Calibrate.self])
+                      Mark.self, ConfigCommand.self, HelperCommand.self, MenuCommand.self, Install.self, Uninstall.self, UpdateCommand.self, Replay.self, Calibrate.self])
 }
 
 /// Run a command and capture its combined output.
@@ -29,9 +29,20 @@ func shell(_ launchPath: String, _ args: [String]) -> (status: Int32, output: St
 
 var launchdDomain: String { "gui/\(getuid())" }
 
-func agentLoaded() -> Bool {
-    shell("/bin/launchctl", ["print", "\(launchdDomain)/\(PmonPaths.label)"]).status == 0
+func agentLoaded(_ label: String) -> Bool {
+    shell("/bin/launchctl", ["print", "\(launchdDomain)/\(label)"]).status == 0
 }
+
+/// The daemon's LaunchAgents that are loaded: ours (`pmon install`) and/or Homebrew's (`brew services`).
+func loadedDaemonLabels() -> [String] {
+    [PmonPaths.label, Installation.homebrewLabel].filter(agentLoaded)
+}
+
+func agentLoaded() -> Bool { !loadedDaemonLabels().isEmpty }
+
+/// The launchd target of the running daemon's LaunchAgent, for `launchctl kickstart`.
+var daemonTarget: String { "\(launchdDomain)/\(loadedDaemonLabels().first ?? Installation.current.daemonLabel)" }
+
 
 struct Replay: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Run a recording through the pipeline into a database.")

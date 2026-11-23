@@ -158,6 +158,24 @@ do {
     Log.info("pmond \(PmonVersion.string) started: db=\(dbPath) system=\(config.systemIntervalSeconds)s process=\(config.processIntervalSeconds)s slow=\(config.slowIntervalSeconds)s"
              + (recordPath.map { " recording=\($0)" } ?? ""))
     scheduler.start()
+
+    // Update check: only for the live installation, never for a test database or another config.
+    // The first check waits a few minutes after start; then hourly, asking GitHub once the interval is due.
+    var updateTimer: DispatchSourceTimer?
+    if config.updates.autoCheck, dbPath == PmonPaths.database, configPath == PmonPaths.config {
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "pmon.update", qos: .utility))
+        t.schedule(deadline: .now() + 180, repeating: 3600, leeway: .seconds(60))
+        t.setEventHandler {
+            guard let r = Updater.scheduledCheck(config: config.updates) else { return }
+            Notifier.deliver(Notice(kind: .update, title: "pmon \(r.version) is available",
+                                    body: Installation.current.isHomebrew
+                                        ? "You have \(PmonVersion.string). Install it with `brew update && brew upgrade pmon`."
+                                        : "You have \(PmonVersion.string). Run `pmon update` or use the menu-bar item to install it."))
+        }
+        t.resume()
+        updateTimer = t
+    }
+    _ = updateTimer
     // A run loop (not just dispatchMain) so that app-activation notifications are delivered.
     RunLoop.main.run()
     exit(0)

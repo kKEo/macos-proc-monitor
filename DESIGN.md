@@ -744,7 +744,7 @@ Every command takes `--json`. The HTML report is a generated static file, not a 
 
 ## 11. Privacy and safety
 
-- All data stays on the machine. No network code in the daemon.
+- All data stays on the machine. The daemon's only network code is the update check: one HTTPS request to the GitHub API about once a day, carrying no recorded data (`updates.autoCheck` switches it off).
 - Database and captures are readable only by the owner (mode 0600 / 0700).
 - Not collected by default: command-line arguments, window titles, URLs, file names, network peers.
 - Stack captures can contain symbol names from the user's own code; they are local and expire after 30 days.

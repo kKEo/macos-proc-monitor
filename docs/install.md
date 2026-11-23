@@ -20,7 +20,19 @@ Optional extras:
 | `pmon config set --recommended` | Deeper evidence during slowdowns: call stacks, threads, short-lived processes, GPU time per app |
 | `sudo pmon helper install` | Exact data for system-owned processes (see [The root helper](helper.md)) |
 
-**Upgrade:** build the new version and run `pmon install` again. Binaries are replaced and the database is migrated when the daemon starts. `pmon status` tells you if the running daemon and the `pmon` you typed are different versions.
+**Upgrade:** run `pmon update`, or choose **Update to pmon …** in the menu-bar item. It downloads the latest release from GitHub, checks its SHA-256 against the published `.sha256` file and the code signatures of the binaries (when your pmon is signed with a Developer ID, the new one must be signed by the same team), then runs the new version's `pmon install`. The daemon checks for a new release once a day and shows a notification once per version; `pmon status` and the menu show it too.
+
+| Command | What it does |
+|---|---|
+| `pmon update` | Install the latest release, after asking (`--yes` to skip the question) |
+| `pmon update --check` | Only tell whether a newer release exists (`--json` for scripts) |
+| `pmon update --version 0.2.2` | Install a specific release, also to reinstall or go back |
+| `pmon update --dry-run` | Download and verify, but do not install |
+| `pmon config updates off` | Stop the daily check; `pmon update` still works |
+
+If the root helper is installed, update it afterwards with `sudo pmon helper install`; `pmon update` reminds you.
+
+To upgrade from source instead, build the new version and run `pmon install` again. Either way binaries are replaced and the database is migrated when the daemon starts. `pmon status` tells you if the running daemon and the `pmon` you typed are different versions.
 
 **Uninstall:**
 
@@ -40,6 +52,8 @@ After `--purge` nothing of pmon remains outside the build directory.
 | `~/Library/Application Support/pmon/config.json` | Configuration (optional; absent means defaults) |
 | `~/Library/Application Support/pmon/captures/` | Evidence files from optional collectors |
 | `~/Library/Application Support/pmon/pmond.log` | The daemon's log |
+| `~/Library/Application Support/pmon/update.json` | What the last update check found |
+| `~/Library/Application Support/pmon/update.log` | Output of an update started from the menu |
 | `~/Library/Application Support/pmon/bin/` | Installed tools |
 | `~/Library/LaunchAgents/dev.pmon.daemon.plist` | The daemon's LaunchAgent (`dev.pmon.menu.plist` for the menu item) |
 

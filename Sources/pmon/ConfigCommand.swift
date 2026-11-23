@@ -19,7 +19,7 @@ struct ConfigCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "config",
         abstract: "Show the optional collectors, their modes and what they cost; switch them.",
-        subcommands: [Show.self, Set.self, Notifications.self], defaultSubcommand: Show.self)
+        subcommands: [Show.self, Set.self, Notifications.self, Updates.self], defaultSubcommand: Show.self)
 
     struct Notifications: ParsableCommand {
         static let configuration = CommandConfiguration(
@@ -43,7 +43,36 @@ struct ConfigCommand: ParsableCommand {
                 print("at most one notification every \(Int(current.minGapMinutes)) minutes. macOS shows them under \"Script Editor\".")
             }
             if config == PmonPaths.config, agentLoaded() {
-                let r = shell("/bin/launchctl", ["kickstart", "-k", "\(launchdDomain)/\(PmonPaths.label)"])
+                let r = shell("/bin/launchctl", ["kickstart", "-k", daemonTarget])
+                print(r.status == 0 ? "daemon restarted" : "could not restart the daemon")
+            }
+        }
+    }
+
+    struct Updates: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Switch the daily check for a newer pmon on GitHub on or off.")
+
+        enum Switch: String, ExpressibleByArgument { case on, off }
+        @Argument(help: "on or off.") var state: Switch
+        @Option(help: "Configuration file.") var config: String = PmonPaths.config
+
+        func run() throws {
+            let current = try Config.load(path: config).updates
+            var root = (FileManager.default.contents(atPath: config).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]) ?? [:]
+            var u = (root["updates"] as? [String: Any]) ?? [:]
+            u["autoCheck"] = state == .on
+            root["updates"] = u
+            try PmonPaths.ensureSupportDir()
+            try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]).write(to: URL(fileURLWithPath: config))
+            print("update checks: \(state.rawValue)")
+            if state == .on {
+                print("The daemon asks GitHub (\(current.repository)) every \(Int(current.checkIntervalHours)) h whether a newer release exists.")
+            } else {
+                print("pmon no longer contacts GitHub by itself; `pmon update` still checks when you run it.")
+            }
+            if config == PmonPaths.config, agentLoaded() {
+                let r = shell("/bin/launchctl", ["kickstart", "-k", daemonTarget])
                 print(r.status == 0 ? "daemon restarted" : "could not restart the daemon")
             }
         }
@@ -76,6 +105,8 @@ struct ConfigCommand: ParsableCommand {
             print("Change with `pmon config set <collector> <mode>`, or `pmon config set --recommended`.")
             let n = try Config.load(path: config).notifications
             print("Notifications: \(n.enabled ? "on" : "off") (`pmon config notifications on|off`).")
+            let u = try Config.load(path: config).updates
+            print("Update checks: \(u.autoCheck ? "daily" : "off") (`pmon config updates on|off`).")
         }
 
         /// Costs observed on this machine: from past captures and scans in the database, and by
@@ -142,7 +173,7 @@ struct ConfigCommand: ParsableCommand {
             try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]).write(to: URL(fileURLWithPath: config))
             for (name, mode) in changes { print("\(name): \(mode.rawValue)") }
             if !noRestart, config == PmonPaths.config, agentLoaded() {
-                let r = shell("/bin/launchctl", ["kickstart", "-k", "\(launchdDomain)/\(PmonPaths.label)"])
+                let r = shell("/bin/launchctl", ["kickstart", "-k", daemonTarget])
                 print(r.status == 0 ? "daemon restarted" : "could not restart the daemon: \(r.output.trimmingCharacters(in: .whitespacesAndNewlines))")
             } else {
                 print("takes effect when the daemon next starts")

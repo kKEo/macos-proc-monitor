@@ -13,6 +13,17 @@ struct Install: ParsableCommand {
     var menu = false
 
     func run() throws {
+        // Homebrew owns its tools and starts the daemon itself; copying them out would leave a second,
+        // never-upgraded daemon behind.
+        if Installation.current.isHomebrew, daemon == nil {
+            print("pmon was installed with Homebrew, which runs the daemon: `brew services start pmon`.")
+            if menu || FileManager.default.fileExists(atPath: PmonPaths.menuAgentPlist) {
+                try MenuCommand.install()
+            } else {
+                print("For the menu-bar item: `pmon menu install`.")
+            }
+            return
+        }
         let fm = FileManager.default
         let source = daemon ?? URL(fileURLWithPath: Bundle.main.executablePath ?? CommandLine.arguments[0])
             .resolvingSymlinksInPath().deletingLastPathComponent().appendingPathComponent("pmond").path
@@ -24,7 +35,7 @@ struct Install: ParsableCommand {
         try PmonPaths.ensureSupportDir()
         let target = PmonPaths.installedDaemon
         try fm.createDirectory(atPath: (target as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
-        if agentLoaded() { shell("/bin/launchctl", ["bootout", "\(launchdDomain)/\(PmonPaths.label)"]) }
+        if agentLoaded(PmonPaths.label) { shell("/bin/launchctl", ["bootout", "\(launchdDomain)/\(PmonPaths.label)"]) }
         if fm.fileExists(atPath: target) { try fm.removeItem(atPath: target) }
         try fm.copyItem(atPath: source, toPath: target)
         // The other tools go along, so the build directory is not needed afterwards. Upgrading is
@@ -77,12 +88,15 @@ struct Uninstall: ParsableCommand {
 
     func run() throws {
         let fm = FileManager.default
-        if agentLoaded() { shell("/bin/launchctl", ["bootout", "\(launchdDomain)/\(PmonPaths.label)"]) }
+        if agentLoaded(PmonPaths.label) { shell("/bin/launchctl", ["bootout", "\(launchdDomain)/\(PmonPaths.label)"]) }
         MenuCommand.uninstall()
         try? fm.removeItem(atPath: PmonPaths.launchAgentPlist)
         try? fm.removeItem(atPath: PmonPaths.binDir)
         if fm.fileExists(atPath: HelperPaths.plist) {
             print("note: the root helper is still installed; remove it with `sudo pmon helper uninstall` (run it before deleting this binary)")
+        }
+        if Installation.current.isHomebrew || agentLoaded(Installation.homebrewLabel) {
+            print("note: Homebrew still runs the daemon; remove it with `brew services stop pmon && brew uninstall pmon`")
         }
         if purge {
             try? fm.removeItem(atPath: PmonPaths.supportDir)
@@ -100,8 +114,12 @@ struct MenuCommand: ParsableCommand {
 
     static func install() throws {
         let fm = FileManager.default
-        let binary = PmonPaths.binDir + "/pmon-menu"
-        guard fm.isExecutableFile(atPath: binary) else { throw ValidationError("pmon-menu is not installed; run `pmon install` first") }
+        // The stable location: our bin directory, or Homebrew's opt link, which survives upgrades.
+        let setup = Installation.current
+        let binary = setup.toolsDir + "/pmon-menu"
+        guard fm.isExecutableFile(atPath: binary) else {
+            throw ValidationError("pmon-menu not found at \(binary); " + (setup.isHomebrew ? "reinstall with `brew reinstall pmon`" : "run `pmon install` first"))
+        }
         let domainTarget = "\(launchdDomain)/\(PmonPaths.menuLabel)"
         if shell("/bin/launchctl", ["print", domainTarget]).status == 0 { shell("/bin/launchctl", ["bootout", domainTarget]) }
         let plist: [String: Any] = [

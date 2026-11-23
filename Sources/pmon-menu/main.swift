@@ -63,9 +63,12 @@ final class MenuController: NSObject, NSMenuDelegate {
 
     init(dbPath: String) {
         self.dbPath = dbPath
-        // The command-line tool sits next to this executable.
-        pmon = URL(fileURLWithPath: Bundle.main.executablePath ?? CommandLine.arguments[0])
-            .resolvingSymlinksInPath().deletingLastPathComponent().appendingPathComponent("pmon").path
+        // The command-line tool: in the installation's stable directory (Homebrew's versioned Cellar
+        // directory disappears on upgrade), else next to this executable.
+        let stable = Installation.current.toolsDir + "/pmon"
+        pmon = FileManager.default.isExecutableFile(atPath: stable) ? stable
+            : URL(fileURLWithPath: Bundle.main.executablePath ?? CommandLine.arguments[0])
+                .resolvingSymlinksInPath().deletingLastPathComponent().appendingPathComponent("pmon").path
         super.init()
         let menu = NSMenu()
         menu.delegate = self
@@ -137,7 +140,157 @@ final class MenuController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
         action("Open HTML report (last 7 days)", #selector(report))
         menu.addItem(.separator())
+        addUpdateItems(menu)
+        menu.addItem(.separator())
         action("Quit pmon menu", #selector(quit), key: "q")
+    }
+
+    // MARK: Updates
+
+    /// The version being installed by a `pmon update` this menu started; the menu restarts when it finishes.
+    private var installing: String?
+    private var checking = false
+
+    private func addUpdateItems(_ menu: NSMenu) {
+        func add(_ title: String, _ selector: Selector?) {
+            let m = NSMenuItem(title: title, action: selector, keyEquivalent: "")
+            m.target = self
+            menu.addItem(m)
+        }
+        let state = UpdateState.load()
+        if let v = installing {
+            add("Installing pmon \(v)…", nil)
+        } else if let r = state.available() {
+            add("Update to pmon \(r.version)…", #selector(installUpdate))
+        }
+        if let e = state.error, installing == nil { add("Last update attempt: \(e.prefix(80))", nil) }
+        add(checking ? "Checking for updates…" : "Check for updates", checking ? nil : #selector(checkForUpdates))
+    }
+
+    @objc private func checkForUpdates() {
+        checking = true
+        let repository = (try? Config.load())?.updates.repository ?? UpdateConfig().repository
+        DispatchQueue.global(qos: .userInitiated).async {
+            var state = UpdateState.load()
+            let result = Result { try Updater.fetchRelease(repository: repository) }
+            switch result {
+            case .success(let r): state.latest = r; state.error = nil
+            case .failure(let e): state.error = "\(e)"
+            }
+            state.checkedMs = Int64(Date().timeIntervalSince1970 * 1000)
+            try? state.save()
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.checking = false
+                    let alert = NSAlert()
+                    switch result {
+                    case .success(let r) where r.isNewer():
+                        alert.messageText = "pmon \(r.version) is available"
+                        alert.informativeText = "You have \(PmonVersion.string)."
+                            + (self.homebrew ? " Install it with:\n\(Installation.current.upgradeCommand)" : "")
+                        alert.addButton(withTitle: self.homebrew ? "Copy command" : "Install")
+                        alert.addButton(withTitle: "Release notes")
+                        alert.addButton(withTitle: "Later")
+                    case .success:
+                        alert.messageText = "pmon \(PmonVersion.string) is up to date"
+                    case .failure(let e):
+                        alert.messageText = "Could not check for updates"
+                        alert.informativeText = "\(e)"
+                    }
+                    NSApp.activate(ignoringOtherApps: true)
+                    let answer = alert.runModal()
+                    if case .success(let r) = result, r.isNewer() {
+                        if answer == .alertFirstButtonReturn { self.homebrew ? self.copyUpgradeCommand() : self.startInstall(r) }
+                        else if answer == .alertSecondButtonReturn, let url = URL(string: r.pageURL) { NSWorkspace.shared.open(url) }
+                    }
+                }
+            }
+        }
+    }
+
+    private let homebrew = Installation.current.isHomebrew
+
+    private func copyUpgradeCommand() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(Installation.current.upgradeCommand, forType: .string)
+    }
+
+    @objc private func installUpdate() {
+        guard let r = UpdateState.load().available() else { return }
+        let alert = NSAlert()
+        if homebrew {
+            // Homebrew installed these files and must be the one to replace them.
+            alert.messageText = "pmon \(r.version) is available"
+            alert.informativeText = "You have \(PmonVersion.string). pmon was installed with Homebrew; upgrade it in a terminal with:\n\n"
+                + Installation.current.upgradeCommand
+            alert.addButton(withTitle: "Copy command")
+            alert.addButton(withTitle: "Release notes")
+            alert.addButton(withTitle: "Cancel")
+            NSApp.activate(ignoringOtherApps: true)
+            switch alert.runModal() {
+            case .alertFirstButtonReturn: copyUpgradeCommand()
+            case .alertSecondButtonReturn: if let url = URL(string: r.pageURL) { NSWorkspace.shared.open(url) }
+            default: break
+            }
+            return
+        }
+        alert.messageText = "Install pmon \(r.version)?"
+        alert.informativeText = "You have \(PmonVersion.string). The archive is downloaded from GitHub and its checksum and signatures are verified. "
+            + "The daemon and this menu item restart; your data and configuration are kept."
+        alert.addButton(withTitle: "Install")
+        alert.addButton(withTitle: "Release notes")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: startInstall(r)
+        case .alertSecondButtonReturn: if let url = URL(string: r.pageURL) { NSWorkspace.shared.open(url) }
+        default: break
+        }
+    }
+
+    /// Run `pmon update --yes` in its own session: `pmon install` restarts this menu's LaunchAgent, and
+    /// launchd kills the process group of a job it stops, which would cut the update off halfway.
+    private func startInstall(_ r: ReleaseInfo) {
+        let log = PmonPaths.supportDir + "/update.log"
+        var actions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&actions)
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
+        posix_spawn_file_actions_addopen(&actions, 1, log, O_WRONLY | O_CREAT | O_TRUNC, 0o600)
+        posix_spawn_file_actions_adddup2(&actions, 1, 2)
+        var attr: posix_spawnattr_t?
+        posix_spawnattr_init(&attr)
+        defer { posix_spawnattr_destroy(&attr) }
+        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID))
+        let argv = [pmon, "update", "--yes", "--version", r.version]
+        var cargs = argv.map { strdup($0) } + [nil]
+        defer { cargs.forEach { free($0) } }
+        var pid: pid_t = 0
+        let rc = posix_spawn(&pid, pmon, &actions, &attr, &cargs, environ)
+        if rc == 0 {
+            installing = r.version
+            // On success `pmon install` restarts this menu and nothing below runs; on failure, say so.
+            DispatchQueue.global(qos: .utility).async {
+                var status: Int32 = 0
+                while waitpid(pid, &status, 0) == -1 && errno == EINTR {}
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        self.installing = nil
+                        guard status != 0 else { return }
+                        let alert = NSAlert()
+                        alert.messageText = "Updating to pmon \(r.version) failed"
+                        alert.informativeText = (UpdateState.load().error ?? "") + "\n\nDetails: \(log)"
+                        NSApp.activate(ignoringOtherApps: true)
+                        alert.runModal()
+                    }
+                }
+            }
+        } else {
+            let alert = NSAlert()
+            alert.messageText = "Could not start the update"
+            alert.informativeText = "\(String(cString: strerror(rc))). Run `pmon update` in a terminal instead."
+            alert.runModal()
+        }
     }
 
     private var dashboard: DashboardWindow { DashboardWindow.shared(dbPath: dbPath) }

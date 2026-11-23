@@ -1,6 +1,6 @@
 # Configuration reference
 
-The configuration file is `~/Library/Application Support/pmon/config.json`. It is optional: every setting has a default, and any subset may be given. The daemon reads it at start; `pmon config set …` and `pmon config notifications …` edit it and restart the daemon for you. After editing by hand:
+The configuration file is `~/Library/Application Support/pmon/config.json`. It is optional: every setting has a default, and any subset may be given. The daemon reads it at start; `pmon config set …` `pmon config notifications …` and `pmon config updates …` edit it and restart the daemon for you. After editing by hand:
 
 ```
 launchctl kickstart -k gui/$(id -u)/dev.pmon.daemon
@@ -68,6 +68,15 @@ Each is `"off"`, `"triggered"` (only around a slowdown, within the budget) or `"
 | `longEpisodeSeconds` | 120 | |
 | `findings` | true | Notify about new findings |
 | `minGapMinutes` | 30 | At most one notification in this many minutes; others are dropped, not queued |
+
+## Updates (`updates`)
+
+| Key | Default | What it does |
+|---|---|---|
+| `autoCheck` | true | Let the daemon ask GitHub for a newer release. `pmon update` works either way |
+| `checkIntervalHours` | 24 | How often (at least 1) |
+| `notify` | true | One notification per new version; independent of the `notifications` switch |
+| `repository` | `kKEo/macos-proc-monitor` | GitHub repository the releases come from, as owner/name (for a fork) |
 
 ## Retention (`retention`)
 

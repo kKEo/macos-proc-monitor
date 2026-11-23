@@ -2,7 +2,8 @@
 
 ## What is recorded
 
-- All data stays in your home directory. pmon makes no network connections.
+- All data stays in your home directory. Nothing pmon records is ever sent anywhere.
+- pmon's only network traffic is the update check: about once a day the daemon asks GitHub's API (`api.github.com`) for the latest release of pmon. The request carries no data about you or your Mac beyond what any HTTPS request does (your IP address and a `pmon/<version>` user agent). `pmon update` additionally downloads the release archive from GitHub. Switch the automatic check off with `pmon config updates off`; `pmon update` then contacts GitHub only when you run it.
 - It records process names, executable paths, app names and resource counters. It does not record window titles, file names, network destinations or keystrokes.
 - Command-line arguments are not collected unless you switch the `args` collector on, and then only into capture files, never the database.
 - Stack captures (the `stack` collector, off by default) contain function names from the sampled program.
