@@ -95,7 +95,7 @@ struct Uninstall: ParsableCommand {
         if fm.fileExists(atPath: HelperPaths.plist) {
             print("note: the root helper is still installed; remove it with `sudo pmon helper uninstall` (run it before deleting this binary)")
         }
-        if Installation.current.isHomebrew || agentLoaded(Installation.homebrewLabel) {
+        if Installation.current.isHomebrew || Installation.homebrewLabels.contains(where: agentLoaded) {
             print("note: Homebrew still runs the daemon; remove it with `brew services stop pmon && brew uninstall pmon`")
         }
         if purge {

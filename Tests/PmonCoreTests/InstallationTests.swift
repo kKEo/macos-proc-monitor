@@ -8,7 +8,8 @@ final class InstallationTests: XCTestCase {
         XCTAssertEqual(Installation.detect(executable: "/usr/local/Cellar/pmon/0.3.0_1/bin/pmond"), .homebrew(prefix: "/usr/local"))
         let brew = Installation.homebrew(prefix: "/opt/homebrew")
         XCTAssertEqual(brew.toolsDir, "/opt/homebrew/opt/pmon/bin", "the opt link, which survives upgrades")
-        XCTAssertEqual(brew.daemonLabel, "homebrew.mxcl.pmon")
+        XCTAssertEqual(brew.daemonLabel, "sh.brew.pmon", "the label current Homebrew gives a formula's service")
+        XCTAssertTrue(Installation.homebrewLabels.contains("homebrew.mxcl.pmon"), "and the one older Homebrew used")
         XCTAssertTrue(brew.upgradeCommand.contains("brew upgrade pmon"))
     }
 

@@ -35,7 +35,7 @@ func agentLoaded(_ label: String) -> Bool {
 
 /// The daemon's LaunchAgents that are loaded: ours (`pmon install`) and/or Homebrew's (`brew services`).
 func loadedDaemonLabels() -> [String] {
-    [PmonPaths.label, Installation.homebrewLabel].filter(agentLoaded)
+    ([PmonPaths.label] + Installation.homebrewLabels).filter(agentLoaded)
 }
 
 func agentLoaded() -> Bool { !loadedDaemonLabels().isEmpty }
