@@ -6,7 +6,7 @@ The configuration file is `~/Library/Application Support/pmon/config.json`. It i
 launchctl kickstart -k gui/$(id -u)/dev.pmon.daemon
 ```
 
-A file that does not parse stops the daemon from starting; the reason is in `pmond.log`.
+A file that does not parse stops the daemon from starting; the reason is in `pmond.log` (in the support directory, or `/opt/homebrew/var/log` with Homebrew).
 
 ```json
 {

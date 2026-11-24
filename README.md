@@ -16,6 +16,16 @@ Requirements: macOS 14 or later on Apple Silicon, and Swift 6 (Xcode 16 or the c
 
 ## Quick start
 
+With [Homebrew](https://brew.sh):
+
+```
+brew install kkeo/tap/pmon
+brew services start pmon
+pmon status
+```
+
+Or from source:
+
 ```
 swift build -c release
 .build/release/pmon install

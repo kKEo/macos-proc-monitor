@@ -186,3 +186,64 @@ jobs:
       - name: Remove the signing keychain
         if: always() && env.MACOS_CERTIFICATE != ''
         run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
+
+  homebrew:
+    name: Homebrew formula and bottle
+    needs: [prepare, release]
+    # After every successful release; skipped (with a notice) for pre-releases or without HOMEBREW_TAP_TOKEN,
+    # a token that can push to kKEo/homebrew-tap (fine-grained, that repository only, Contents: read and write).
+    if: always() && needs.release.result == 'success'
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      TAG: ${{ needs.prepare.outputs.tag || github.ref_name }}
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Decide whether to publish
+        id: check
+        run: |
+          version="${TAG#v}"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::notice::HOMEBREW_TAP_TOKEN is not set; the Homebrew formula is not updated"
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          elif [[ "$version" == *-* ]]; then
+            echo "::notice::$TAG is a pre-release; the Homebrew formula stays on the latest release"
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v7
+        if: steps.check.outputs.skip != '1'
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Tap kKEo/homebrew-tap
+        if: steps.check.outputs.skip != '1'
+        run: git clone "https://x-access-token:${TAP_TOKEN}@github.com/kKEo/homebrew-tap.git" "$(brew --repository)/Library/Taps/kkeo/homebrew-tap"
+
+      - name: Write the formula and build the bottle
+        if: steps.check.outputs.skip != '1'
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "pmon-$VERSION.tar.gz.sha256" --dir "$RUNNER_TEMP"
+          sha="$(cut -d' ' -f1 "$RUNNER_TEMP/pmon-$VERSION.tar.gz.sha256")"
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+          # One bottle labelled for the oldest supported macOS serves that version and every newer one.
+          BOTTLE_TAG=arm64_sonoma Support/homebrew.sh "$VERSION" "$sha" kkeo/tap "$base" "$RUNNER_TEMP/bottles" "$base/pmon-$VERSION.tar.gz"
+
+      # The bottle goes up before the formula that points at it.
+      - name: Attach the bottle to the release
+        if: steps.check.outputs.skip != '1'
+        run: gh release upload "$TAG" "$RUNNER_TEMP"/bottles/*.bottle.tar.gz --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Push the formula
+        if: steps.check.outputs.skip != '1'
+        run: |
+          cd "$(brew --repository kkeo/tap)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/pmon.rb
+          if git diff --cached --quiet; then echo "the formula is unchanged"; exit 0; fi
+          git commit -m "pmon $VERSION"
+          # The clone is on the tap's default branch, which is the one Homebrew reads.
+          git push origin HEAD
